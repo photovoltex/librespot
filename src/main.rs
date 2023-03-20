@@ -10,9 +10,11 @@ use std::{
 };
 
 use futures_util::StreamExt;
+use librespot_connect::spirc::SpircRemoteUpdate;
 use log::{error, info, trace, warn};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
+use tokio::sync::mpsc::UnboundedReceiver;
 use url::Url;
 
 use librespot::{
@@ -37,6 +39,8 @@ use librespot::playback::mixer::alsamixer::AlsaMixer;
 
 mod player_event_handler;
 use player_event_handler::{run_program_on_sink_events, EventHandler};
+
+type RemoteEvent = UnboundedReceiver<SpircRemoteUpdate>;
 
 fn device_id(name: &str) -> String {
     hex::encode(Sha1::digest(name.as_bytes()))
@@ -1657,6 +1661,7 @@ async fn main() {
     let mut last_credentials = None;
     let mut spirc: Option<Spirc> = None;
     let mut spirc_task: Option<Pin<_>> = None;
+    let mut event_rx: Option<RemoteEvent> = None;
     let mut auto_connect_times: Vec<Instant> = vec![];
     let mut discovery = None;
     let mut connecting = false;
@@ -1744,8 +1749,8 @@ async fn main() {
                     }
                 };
 
-                let (spirc_, spirc_task_) = match Spirc::new(connect_config, session.clone(), last_credentials.clone().unwrap_or_default(), player, mixer).await {
-                    Ok((spirc_, spirc_task_)) => (spirc_, spirc_task_),
+                let (spirc_, spirc_task_, event_rx_) = match Spirc::new(connect_config, session.clone(), last_credentials.clone().unwrap_or_default(), player, mixer).await {
+                    Ok((spirc_, spirc_task_, event_rx_)) => (spirc_, spirc_task_, event_rx_),
                     Err(e) => {
                         error!("could not initialize spirc: {}", e);
                         exit(1);
@@ -1753,6 +1758,7 @@ async fn main() {
                 };
                 spirc = Some(spirc_);
                 spirc_task = Some(Box::pin(spirc_task_));
+                event_rx = Some(event_rx_);
 
                 connecting = false;
             },
@@ -1781,6 +1787,22 @@ async fn main() {
                     },
                 }
             },
+            _ = async {
+                if let Some(_event_rx) = event_rx.as_mut() {
+                        match _event_rx.recv().await {
+                            Some(event) => match event {
+                                SpircRemoteUpdate::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
+                                SpircRemoteUpdate::Volume(volume) => info!("updated volume: {volume}"),
+                                SpircRemoteUpdate::PlayingIndex(index) => info!("updated index: {index}"),
+                                SpircRemoteUpdate::Repeat(repeat) => info!("updated repeat: {repeat}"),
+                                SpircRemoteUpdate::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
+                                SpircRemoteUpdate::Context(context) => info!("updated context: {context}"),
+                                SpircRemoteUpdate::Playing(playing) => info!("updated playing: {playing}"),
+                            },
+                            None => info!("no event")
+                        }
+                    }
+            }, if event_rx.is_some() => {},
             _ = tokio::signal::ctrl_c() => {
                 break;
             },

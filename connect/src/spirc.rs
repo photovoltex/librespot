@@ -43,13 +43,15 @@ pub enum SpircError {
     Ident(String),
     #[error("message pushed for another URI")]
     InvalidUri(String),
+    #[error("internal component missing to proceed")]
+    InternalComponentMissing
 }
 
 impl From<SpircError> for Error {
     fn from(err: SpircError) -> Self {
         use SpircError::*;
         match err {
-            NoData | UnsupportedLocalPlayBack => Error::unavailable(err),
+            NoData | UnsupportedLocalPlayBack | InternalComponentMissing => Error::unavailable(err),
             Ident(_) | InvalidUri(_) => Error::aborted(err),
         }
     }
@@ -94,6 +96,7 @@ struct SpircTask {
     user_attributes_mutation: BoxedStream<Result<UserAttributesMutation, Error>>,
     sender: MercurySender,
     commands: Option<mpsc::UnboundedReceiver<SpircCommand>>,
+    event_sender: Option<mpsc::UnboundedSender<SpircRemoteUpdate>>,
     player_events: Option<PlayerEventChannel>,
 
     shutdown: bool,
@@ -124,6 +127,17 @@ pub enum SpircCommand {
     SetVolume(u16),
     Activate,
     Load(SpircLoadCommand),
+}
+
+#[derive(Debug)]
+pub enum SpircRemoteUpdate {
+    Tacks(Vec<TrackRef>),
+    PlayingIndex(u32),
+    Volume(u32),
+    Repeat(bool),
+    Shuffle(bool),
+    Context(String),
+    Playing(bool),
 }
 
 #[derive(Debug)]
@@ -267,6 +281,8 @@ fn url_encode(bytes: impl AsRef<[u8]>) -> String {
     form_urlencoded::byte_serialize(bytes.as_ref()).collect()
 }
 
+type RemoteReceiverChannel = mpsc::UnboundedReceiver<SpircRemoteUpdate>;
+
 impl Spirc {
     pub async fn new(
         config: ConnectConfig,
@@ -274,7 +290,7 @@ impl Spirc {
         credentials: Credentials,
         player: Player,
         mixer: Box<dyn Mixer>,
-    ) -> Result<(Spirc, impl Future<Output = ()>), Error> {
+    ) -> Result<(Spirc, impl Future<Output = ()>, RemoteReceiverChannel), Error> {
         let spirc_id = SPIRC_COUNTER.fetch_add(1, Ordering::AcqRel);
         debug!("new Spirc[{}]", spirc_id);
 
@@ -347,6 +363,7 @@ impl Spirc {
         let sender = session.mercury().sender(sender_uri);
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let initial_volume = config.initial_volume;
 
@@ -373,6 +390,7 @@ impl Spirc {
             user_attributes_mutation,
             sender,
             commands: Some(cmd_rx),
+            event_sender: Some(event_tx),
             player_events: Some(player_events),
 
             shutdown: false,
@@ -396,7 +414,7 @@ impl Spirc {
 
         task.hello()?;
 
-        Ok((spirc, task.run()))
+        Ok((spirc, task.run(), event_rx))
     }
 
     pub fn play(&self) -> Result<(), Error> {
@@ -985,18 +1003,92 @@ impl SpircTask {
                 self.notify(None)
             }
 
+            // this event is mostly fired if a remote player has control
             MessageType::kMessageTypeNotify => {
                 if self.device.is_active()
                     && update.device_state.is_active()
                     && self.device.became_active_at() <= update.device_state.became_active_at()
                 {
                     self.handle_disconnect();
+                } else {
+                    self.handle_remote(update)?;
                 }
+
                 self.notify(None)
             }
 
             _ => Ok(()),
         }
+    }
+
+    fn handle_remote(&mut self, frame: Frame) -> Result<(), Error> {
+        let event_sender = self.event_sender.as_ref()
+            .ok_or(SpircError::InternalComponentMissing)?;
+
+        let device_state = frame.device_state.get_or_default();
+        if self.device.volume.ne(&device_state.volume) {
+            trace!("volume: self({:?}) remote({:?})", self.device.volume, device_state.volume);
+            if let Some(volume) = device_state.volume {
+                self.device.volume = device_state.volume;
+                event_sender.send(SpircRemoteUpdate::Volume(volume))?
+            }
+        }
+        
+        let state = frame.state.get_or_default();
+
+        // todo: check if playing_track_index is more accurate then index
+        if self.state.playing_track_index.ne(&state.playing_track_index) {
+            trace!("playing_track_index: self({:?}) remote({:?})", self.state.playing_track_index, state.playing_track_index);
+            if let Some(playing_track_index) = state.playing_track_index {
+                event_sender.send(SpircRemoteUpdate::PlayingIndex(playing_track_index))?
+            }
+        }
+
+        if self.state.repeat.ne(&state.repeat) {
+            trace!("repeat: self({:?}) remote({:?})", self.state.repeat, state.repeat);
+            if let Some(repeat) = state.repeat {
+                event_sender.send(SpircRemoteUpdate::Repeat(repeat))?
+            }
+        }
+
+        if self.state.shuffle.ne(&state.shuffle) {
+            trace!("shuffle: self({:?}) remote({:?})", self.state.shuffle, state.shuffle);
+            if let Some(shuffle) = state.shuffle {
+                event_sender.send(SpircRemoteUpdate::Shuffle(shuffle))?
+            }
+        }
+        
+        if self.state.context_uri.ne(&state.context_uri) {
+            trace!("context: self({:?}) remote({:?})", self.state.context_uri, state.context_uri);
+            if let Some(context_uri) = state.context_uri.clone() {
+                event_sender.send(SpircRemoteUpdate::Context(context_uri))?
+            }
+        }
+
+        if self.state.track.ne(&state.track) {
+            trace!("context: self({}) remote({})", self.state.track.len(), state.track.len());
+            event_sender.send(SpircRemoteUpdate::Tacks(state.track.clone()))?
+        }
+
+        if self.state.status.ne(&state.status) {
+            trace!("status: self({:?}) remote({:?})", self.state.status, state.status);
+            if let Some(status) = state.status {
+                if let Ok(status) = status.enum_value() {
+                    let playing = match status {
+                        PlayStatus::kPlayStatusStop | PlayStatus::kPlayStatusPause => false,
+                        PlayStatus::kPlayStatusPlay | PlayStatus::kPlayStatusLoading => true,
+                    };
+                    event_sender.send(SpircRemoteUpdate::Playing(playing))?
+                }
+            }
+        }
+
+        if self.state.ne(state) {
+            trace!("state is different");
+            self.state = state.clone();
+        }
+
+        Ok(())
     }
 
     fn handle_disconnect(&mut self) {
