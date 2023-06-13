@@ -38,7 +38,7 @@ https://github.com/librespot-org/librespot
 - [all] Improve lock contention and performance (breaking)
 - [audio] Files are now downloaded over the HTTPS CDN (breaking)
 - [audio] Improve file opening and seeking performance (breaking)
-- [chore] MSRV is now 1.61 (breaking)
+- [core] MSRV is now 1.65 (breaking)
 - [connect] `DeviceType` moved out of `connect` into `core` (breaking)
 - [connect] Update and expose all `spirc` context fields (breaking)
 - [connect] Add `Clone, Defaut` traits to `spirc` contexts
@@ -87,6 +87,7 @@ https://github.com/librespot-org/librespot
 - [core] Support downloading of lyrics
 - [core] Support parsing `SpotifyId` for local files
 - [core] Support parsing `SpotifyId` for named playlists
+- [core] Add checks and handling for stale server connections.
 - [main] Add all player events to `player_event_handler.rs`
 - [main] Add an event worker thread that runs async to the main thread(s) but
   sync to itself to prevent potential data races for event consumers
@@ -112,6 +113,7 @@ https://github.com/librespot-org/librespot
   from the beginning
 - [playback] Handle disappearing and invalid devices better
 - [playback] Handle seek, pause, and play commands while loading
+- [playback] Handle disabled normalisation correctly when using fixed volume
 - [metadata] Fix missing colon when converting named spotify IDs to URIs
 
 ## [0.4.2] - 2022-07-29
