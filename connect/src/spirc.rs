@@ -612,6 +612,9 @@ impl SpircTask {
                 rx.close()
             }
             Ok(())
+        } else if let SpircCommand::AddEventSender(sender) = cmd {
+            self.event_sender.push(sender);
+            Ok(())
         } else if self.device.is_active() {
             trace!("Received SpircCommand::{:?}", cmd);
             match cmd {
@@ -666,10 +669,6 @@ impl SpircTask {
                 SpircCommand::Load(command) => {
                     self.handle_load(&command.into())?;
                     self.notify(None)
-                }
-                SpircCommand::AddEventSender(sender) => {
-                    self.event_sender.push(sender);
-                    Ok(())
                 }
                 _ => Ok(()),
             }
