@@ -10,7 +10,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use librespot_connect::spirc::SpircRemoteUpdate;
+use librespot_connect::spirc::SpircEvent;
 use log::{error, info, trace, warn};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
@@ -1659,7 +1659,7 @@ async fn main() {
     let mut last_credentials = None;
     let mut spirc: Option<Spirc> = None;
     let mut spirc_task: Option<Pin<_>> = None;
-    let mut event_rx: Option<UnboundedReceiver<Vec<SpircRemoteUpdate>>> = None;
+    let mut event_rx: Option<UnboundedReceiver<Vec<SpircEvent>>> = None;
     let mut auto_connect_times: Vec<Instant> = vec![];
     let mut discovery = None;
     let mut connecting = false;
@@ -1791,13 +1791,13 @@ async fn main() {
                         match _event_rx.recv().await {
                             Some(events) => {
                                 events.into_iter().for_each(|event| match event {
-                                    SpircRemoteUpdate::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
-                                    SpircRemoteUpdate::Volume(volume) => info!("updated volume: {volume}"),
-                                    SpircRemoteUpdate::PlayingIndex(index) => info!("updated index: {index}"),
-                                    SpircRemoteUpdate::Repeat(repeat) => info!("updated repeat: {repeat}"),
-                                    SpircRemoteUpdate::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
-                                    SpircRemoteUpdate::Context(context) => info!("updated context: {context}"),
-                                    SpircRemoteUpdate::Playing(playing) => info!("updated playing: {playing}"),
+                                    SpircEvent::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
+                                    SpircEvent::Volume(volume) => info!("updated volume: {volume}"),
+                                    SpircEvent::PlayingIndex(index) => info!("updated index: {index}"),
+                                    SpircEvent::Repeat(repeat) => info!("updated repeat: {repeat}"),
+                                    SpircEvent::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
+                                    SpircEvent::Context(context) => info!("updated context: {context}"),
+                                    SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
                                 })
                             },
                             None => info!("no event")

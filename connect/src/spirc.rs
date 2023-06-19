@@ -8,7 +8,7 @@ use std::{
 
 use futures_util::{stream::FusedStream, FutureExt, StreamExt};
 
-use protobuf::{self, Message};
+use protobuf::{self, Message, MessageField};
 use rand::prelude::SliceRandom;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -74,6 +74,17 @@ enum SpircPlayStatus {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum SpircEvent {
+    Tacks(Vec<TrackRef>),
+    PlayingIndex(u32),
+    Volume(u32),
+    Repeat(bool),
+    Shuffle(bool),
+    Context(String),
+    Playing(bool),
+}
+
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
 
 struct SpircTask {
@@ -94,7 +105,7 @@ struct SpircTask {
     user_attributes_mutation: BoxedStream<Result<UserAttributesMutation, Error>>,
     sender: MercurySender,
     commands: Option<mpsc::UnboundedReceiver<SpircCommand>>,
-    event_sender: Vec<mpsc::UnboundedSender<Vec<SpircRemoteUpdate>>>,
+    event_sender: Vec<mpsc::UnboundedSender<Vec<SpircEvent>>>,
     player_events: Option<PlayerEventChannel>,
 
     shutdown: bool,
@@ -125,18 +136,7 @@ pub enum SpircCommand {
     SetVolume(u16),
     Activate,
     Load(SpircLoadCommand),
-    AddEventSender(mpsc::UnboundedSender<Vec<SpircRemoteUpdate>>),
-}
-
-#[derive(Debug, Clone)]
-pub enum SpircRemoteUpdate {
-    Tacks(Vec<TrackRef>),
-    PlayingIndex(u32),
-    Volume(u32),
-    Repeat(bool),
-    Shuffle(bool),
-    Context(String),
-    Playing(bool),
+    AddEventSender(mpsc::UnboundedSender<Vec<SpircEvent>>),
 }
 
 #[derive(Debug)]
@@ -415,7 +415,7 @@ impl Spirc {
 
     pub fn get_remote_event_channel(
         &self,
-    ) -> Result<mpsc::UnboundedReceiver<Vec<SpircRemoteUpdate>>, Error> {
+    ) -> Result<mpsc::UnboundedReceiver<Vec<SpircEvent>>, Error> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         self.commands.send(SpircCommand::AddEventSender(event_tx))?;
         Ok(event_rx)
@@ -1017,7 +1017,7 @@ impl SpircTask {
                     && self.device.became_active_at() <= update.device_state.became_active_at()
                 {
                     self.handle_disconnect();
-                } else {
+                } else if !self.event_sender.is_empty() {
                     self.handle_remote(update)?;
                 }
 
@@ -1031,103 +1031,76 @@ impl SpircTask {
     fn handle_remote(&mut self, frame: Frame) -> Result<(), Error> {
         let mut updates = Vec::new();
 
-        let device_state = frame.device_state.get_or_default();
-        if self.device.volume.ne(&device_state.volume) {
-            trace!(
-                "volume: self({:?}) remote({:?})",
-                self.device.volume,
-                device_state.volume
-            );
-            if let Some(volume) = device_state.volume {
-                self.device.volume = device_state.volume;
-                updates.push(SpircRemoteUpdate::Volume(volume))
-            }
-        }
-
-        let state = frame.state.get_or_default();
-
-        // todo: check if playing_track_index is more accurate then index
-        if self
-            .state
-            .playing_track_index
-            .ne(&state.playing_track_index)
-        {
-            trace!(
-                "playing_track_index: self({:?}) remote({:?})",
-                self.state.playing_track_index,
-                state.playing_track_index
-            );
-            if let Some(playing_track_index) = state.playing_track_index {
-                updates.push(SpircRemoteUpdate::PlayingIndex(playing_track_index))
-            }
-        }
-
-        if self.state.repeat.ne(&state.repeat) {
-            trace!(
-                "repeat: self({:?}) remote({:?})",
-                self.state.repeat,
-                state.repeat
-            );
-            if let Some(repeat) = state.repeat {
-                updates.push(SpircRemoteUpdate::Repeat(repeat))
-            }
-        }
-
-        if self.state.shuffle.ne(&state.shuffle) {
-            trace!(
-                "shuffle: self({:?}) remote({:?})",
-                self.state.shuffle,
-                state.shuffle
-            );
-            if let Some(shuffle) = state.shuffle {
-                updates.push(SpircRemoteUpdate::Shuffle(shuffle))
-            }
-        }
-
-        if self.state.context_uri.ne(&state.context_uri) {
-            trace!(
-                "context: self({:?}) remote({:?})",
-                self.state.context_uri,
-                state.context_uri
-            );
-            if let Some(context_uri) = state.context_uri.clone() {
-                updates.push(SpircRemoteUpdate::Context(context_uri))
-            }
-        }
-
-        if self.state.track.ne(&state.track) {
-            trace!(
-                "context: self({}) remote({})",
-                self.state.track.len(),
-                state.track.len()
-            );
-            updates.push(SpircRemoteUpdate::Tacks(state.track.clone()))
-        }
-
-        if self.state.status.ne(&state.status) {
-            trace!(
-                "status: self({:?}) remote({:?})",
-                self.state.status,
-                state.status
-            );
-            if let Some(status) = state.status {
-                if let Ok(status) = status.enum_value() {
-                    let playing = match status {
-                        PlayStatus::kPlayStatusStop | PlayStatus::kPlayStatusPause => false,
-                        PlayStatus::kPlayStatusPlay | PlayStatus::kPlayStatusLoading => true,
-                    };
-                    updates.push(SpircRemoteUpdate::Playing(playing))
+        if let Some(device_state) = frame.device_state.0 {
+            if self.device.volume.ne(&device_state.volume) {
+                if let Some(volume) = device_state.volume {
+                    trace!("volume updated");
+                    self.device.volume = device_state.volume;
+                    updates.push(SpircEvent::Volume(volume))
                 }
+            }
+        }
+
+        let initial_state = &self.state;
+        let MessageField(state) = frame.state;
+        if let Some(state) = state {
+            // todo: check if playing_track_index is more accurate then index
+            if initial_state
+                .playing_track_index
+                .ne(&state.playing_track_index)
+            {
+                if let Some(playing_track_index) = state.playing_track_index {
+                    trace!("plating_index updated");
+                    updates.push(SpircEvent::PlayingIndex(playing_track_index))
+                }
+            }
+
+            if initial_state.repeat.ne(&state.repeat) {
+                if let Some(repeat) = state.repeat {
+                    trace!("repeat updated");
+                    updates.push(SpircEvent::Repeat(repeat))
+                }
+            }
+
+            if initial_state.shuffle.ne(&state.shuffle) {
+                if let Some(shuffle) = state.shuffle {
+                    trace!("shuffle updated");
+                    updates.push(SpircEvent::Shuffle(shuffle))
+                }
+            }
+
+            if initial_state.context_uri.ne(&state.context_uri) {
+                if let Some(context_uri) = state.context_uri.clone() {
+                    trace!("context updated");
+                    updates.push(SpircEvent::Context(context_uri))
+                }
+            }
+
+            if initial_state.track.ne(&state.track) {
+                trace!("tracks updated");
+                updates.push(SpircEvent::Tacks(state.track.clone()))
+            }
+
+            if initial_state.status.ne(&state.status) {
+                if let Some(status) = state.status {
+                    if let Ok(status) = status.enum_value() {
+                        let playing = match status {
+                            PlayStatus::kPlayStatusStop | PlayStatus::kPlayStatusPause => false,
+                            PlayStatus::kPlayStatusPlay | PlayStatus::kPlayStatusLoading => true,
+                        };
+                        updates.push(SpircEvent::Playing(playing))
+                    }
+                }
+            }
+
+            if initial_state.ne(&state) {
+                trace!("state updated");
+                self.state = *state;
             }
         }
 
         self.event_sender
             .retain(|sender| sender.send(updates.clone()).is_ok());
-
-        if self.state.ne(state) {
-            trace!("state is different");
-            self.state = state.clone();
-        }
 
         Ok(())
     }
