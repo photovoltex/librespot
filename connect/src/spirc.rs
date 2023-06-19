@@ -83,7 +83,7 @@ pub enum SpircEvent {
     Shuffle(bool),
     Context(String),
     Playing(bool),
-    PositionMs(u32),
+    Position{ ms: u32, measured_at: u64 },
 }
 
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
@@ -1018,7 +1018,7 @@ impl SpircTask {
                     && self.device.became_active_at() <= update.device_state.became_active_at()
                 {
                     self.handle_disconnect();
-                } else if !self.event_sender.is_empty() {
+                } else if update.state.is_some() && !self.event_sender.is_empty() {
                     self.handle_remote_events(update)?;
                 }
 
@@ -1094,20 +1094,19 @@ impl SpircTask {
             }
 
             if initial_state.position_ms.ne(&state.position_ms) {
-                if let Some(position_ms) = state.position_ms {
-                    trace!("position_ms updated");
-                    updates.push(SpircEvent::PositionMs(position_ms));
+                if let (Some(position_ms), Some(position_measured_at)) = (state.position_ms, state.position_measured_at) {
+                    trace!("position updated");
+                    updates.push(SpircEvent::Position{ ms: position_ms, measured_at: position_measured_at });
                 }
             }
 
             if initial_state.ne(&state) {
                 trace!("state updated");
                 self.state = *state;
+                self.event_sender
+                    .retain(|sender| sender.send(updates.clone()).is_ok());
             }
         }
-
-        self.event_sender
-            .retain(|sender| sender.send(updates.clone()).is_ok());
 
         Ok(())
     }

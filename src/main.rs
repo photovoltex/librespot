@@ -1786,25 +1786,27 @@ async fn main() {
                     exit(1);
                 }
             },
-            _ = async {
-                if let Some(_event_rx) = event_rx.as_mut() {
-                        match _event_rx.recv().await {
-                            Some(events) => {
-                                events.into_iter().for_each(|event| match event {
-                                    SpircEvent::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
-                                    SpircEvent::Volume(volume) => info!("updated volume: {volume}"),
-                                    SpircEvent::PlayingIndex(index) => info!("updated index: {index}"),
-                                    SpircEvent::Repeat(repeat) => info!("updated repeat: {repeat}"),
-                                    SpircEvent::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
-                                    SpircEvent::Context(context) => info!("updated context: {context}"),
-                                    SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
-                                    SpircEvent::PositionMs(position) => info!("updated position: {position}"),
-                                })
-                            },
-                            None => info!("no event")
-                        }
-                    }
-            }, if event_rx.is_some() => {},
+            events = async {
+                log::info!("new recv");
+                event_rx.as_mut().expect("to be some some").recv().await
+            }, if event_rx.is_some() => {
+                match events {
+                    Some(events) => {
+                        log::info!("{}", events.len());
+                        events.into_iter().for_each(|event| match event {
+                            SpircEvent::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
+                            SpircEvent::Volume(volume) => info!("updated volume: {volume}"),
+                            SpircEvent::PlayingIndex(index) => info!("updated index: {index}"),
+                            SpircEvent::Repeat(repeat) => info!("updated repeat: {repeat}"),
+                            SpircEvent::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
+                            SpircEvent::Context(context) => info!("updated context: {context}"),
+                            SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
+                            SpircEvent::Position{ ms, measured_at } => info!("updated position: {ms} at {measured_at}"),
+                        })
+                    },
+                    None => info!("no event")
+                }
+            },
             _ = tokio::signal::ctrl_c() => {
                 break;
             },
