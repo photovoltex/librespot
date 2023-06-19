@@ -83,6 +83,7 @@ pub enum SpircEvent {
     Shuffle(bool),
     Context(String),
     Playing(bool),
+    PositionMs(u32),
 }
 
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
@@ -1018,7 +1019,7 @@ impl SpircTask {
                 {
                     self.handle_disconnect();
                 } else if !self.event_sender.is_empty() {
-                    self.handle_remote(update)?;
+                    self.handle_remote_events(update)?;
                 }
 
                 self.notify(None)
@@ -1028,7 +1029,7 @@ impl SpircTask {
         }
     }
 
-    fn handle_remote(&mut self, frame: Frame) -> Result<(), Error> {
+    fn handle_remote_events(&mut self, frame: Frame) -> Result<(), Error> {
         let mut updates = Vec::new();
 
         if let Some(device_state) = frame.device_state.0 {
@@ -1044,7 +1045,6 @@ impl SpircTask {
         let initial_state = &self.state;
         let MessageField(state) = frame.state;
         if let Some(state) = state {
-            // todo: check if playing_track_index is more accurate then index
             if initial_state
                 .playing_track_index
                 .ne(&state.playing_track_index)
@@ -1090,6 +1090,13 @@ impl SpircTask {
                         };
                         updates.push(SpircEvent::Playing(playing))
                     }
+                }
+            }
+
+            if initial_state.position_ms.ne(&state.position_ms) {
+                if let Some(position_ms) = state.position_ms {
+                    trace!("position_ms updated");
+                    updates.push(SpircEvent::PositionMs(position_ms));
                 }
             }
 

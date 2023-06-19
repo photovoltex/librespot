@@ -1798,6 +1798,7 @@ async fn main() {
                                     SpircEvent::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
                                     SpircEvent::Context(context) => info!("updated context: {context}"),
                                     SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
+                                    SpircEvent::PositionMs(position) => info!("updated position: {position}"),
                                 })
                             },
                             None => info!("no event")
