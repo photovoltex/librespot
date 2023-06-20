@@ -1787,21 +1787,20 @@ async fn main() {
                 }
             },
             events = async {
-                log::info!("new recv");
                 event_rx.as_mut().expect("to be some some").recv().await
             }, if event_rx.is_some() => {
                 match events {
                     Some(events) => {
-                        log::info!("{}", events.len());
                         events.into_iter().for_each(|event| match event {
                             SpircEvent::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
                             SpircEvent::Volume(volume) => info!("updated volume: {volume}"),
                             SpircEvent::PlayingIndex(index) => info!("updated index: {index}"),
                             SpircEvent::Repeat(repeat) => info!("updated repeat: {repeat}"),
                             SpircEvent::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
-                            SpircEvent::Context(context) => info!("updated context: {context}"),
+                            SpircEvent::ContextUri(context) => info!("updated context: {context}"),
                             SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
                             SpircEvent::Position{ ms, measured_at } => info!("updated position: {ms} at {measured_at}"),
+                            SpircEvent::ActiveDevice(device) => info!("updated active device: {}", device.name()),
                         })
                     },
                     None => info!("no event")

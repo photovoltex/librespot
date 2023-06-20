@@ -76,14 +76,15 @@ enum SpircPlayStatus {
 
 #[derive(Debug, Clone)]
 pub enum SpircEvent {
-    Tacks(Vec<TrackRef>),
+    ActiveDevice(DeviceState),
+    ContextUri(String),
+    Playing(bool),
     PlayingIndex(u32),
+    Position { ms: u32, measured_at: u64 },
     Volume(u32),
     Repeat(bool),
     Shuffle(bool),
-    Context(String),
-    Playing(bool),
-    Position{ ms: u32, measured_at: u64 },
+    Tacks(Vec<TrackRef>),
 }
 
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
@@ -1040,6 +1041,12 @@ impl SpircTask {
                     updates.push(SpircEvent::Volume(volume))
                 }
             }
+
+            if self.device.name.ne(&device_state.name) && device_state.is_active() {
+                trace!("active device updated");
+                self.device = (*device_state).clone();
+                updates.push(SpircEvent::ActiveDevice(*device_state))
+            }
         }
 
         let initial_state = &self.state;
@@ -1072,7 +1079,7 @@ impl SpircTask {
             if initial_state.context_uri.ne(&state.context_uri) {
                 if let Some(context_uri) = state.context_uri.clone() {
                     trace!("context updated");
-                    updates.push(SpircEvent::Context(context_uri))
+                    updates.push(SpircEvent::ContextUri(context_uri))
                 }
             }
 
@@ -1094,9 +1101,14 @@ impl SpircTask {
             }
 
             if initial_state.position_ms.ne(&state.position_ms) {
-                if let (Some(position_ms), Some(position_measured_at)) = (state.position_ms, state.position_measured_at) {
+                if let (Some(position_ms), Some(position_measured_at)) =
+                    (state.position_ms, state.position_measured_at)
+                {
                     trace!("position updated");
-                    updates.push(SpircEvent::Position{ ms: position_ms, measured_at: position_measured_at });
+                    updates.push(SpircEvent::Position {
+                        ms: position_ms,
+                        measured_at: position_measured_at,
+                    });
                 }
             }
 
