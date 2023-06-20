@@ -211,6 +211,7 @@ fn get_setup() -> Setup {
     const ENABLE_VOLUME_NORMALISATION: &str = "enable-volume-normalisation";
     const FORMAT: &str = "format";
     const HELP: &str = "help";
+    const HIDDEN: &str = "hidden";
     const INITIAL_VOLUME: &str = "initial-volume";
     const MIXER_TYPE: &str = "mixer";
     const ALSA_MIXER_DEVICE: &str = "alsa-mixer-device";
@@ -257,6 +258,7 @@ fn get_setup() -> Setup {
     const DISABLE_GAPLESS_SHORT: &str = "g";
     const DISABLE_CREDENTIAL_CACHE_SHORT: &str = "H";
     const HELP_SHORT: &str = "h";
+    const HIDDEN_SHORT: &str = "I";
     const ZEROCONF_INTERFACE_SHORT: &str = "i";
     const CACHE_SIZE_LIMIT_SHORT: &str = "M";
     const MIXER_TYPE_SHORT: &str = "m";
@@ -576,6 +578,12 @@ fn get_setup() -> Setup {
         ZEROCONF_INTERFACE,
         "Comma-separated interface IP addresses on which zeroconf will bind. Defaults to all interfaces. Ignored by DNS-SD.",
         "IP"
+    )
+    .optopt(
+        HIDDEN_SHORT,
+        HIDDEN,
+        "T. Defaults to false.",
+        "HIDDEN",
     );
 
     #[cfg(feature = "passthrough-decoder")]
@@ -1311,6 +1319,17 @@ fn get_setup() -> Setup {
             })
             .unwrap_or_default();
 
+        let hidden = opt_str(HIDDEN)
+            .as_deref()
+            .map(|hidden| {
+                bool::from_str(hidden).unwrap_or_else(|_| {
+                    invalid_error_msg(HIDDEN, HIDDEN_SHORT, hidden, "true, false", "false");
+
+                    exit(1);
+                })
+            })
+            .unwrap_or_default();
+
         let has_volume_ctrl = !matches!(mixer_config.volume_ctrl, VolumeCtrl::Fixed);
 
         ConnectConfig {
@@ -1318,6 +1337,7 @@ fn get_setup() -> Setup {
             device_type,
             initial_volume,
             has_volume_ctrl,
+            hidden,
         }
     };
 

@@ -242,8 +242,10 @@ fn initial_device_state(config: ConnectConfig) -> DeviceState {
     ));
     // TODO: what does this hide, or who do we hide from?
     // May be an interesting privacy toggle.
-    msg.capabilities
-        .push(int_capability(protocol::spirc::CapabilityType::kHidden, 0));
+    msg.capabilities.push(int_capability(
+        protocol::spirc::CapabilityType::kHidden,
+        if config.hidden { 1 } else { 0 },
+    ));
     let mut supported_types = protocol::spirc::Capability::new();
     supported_types.set_typ(protocol::spirc::CapabilityType::kSupportedTypes);
     supported_types
