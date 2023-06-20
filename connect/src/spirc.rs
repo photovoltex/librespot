@@ -77,7 +77,7 @@ enum SpircPlayStatus {
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
 
 struct SpircTask {
-    player: Player,
+    player: Option<Player>,
     mixer: Box<dyn Mixer>,
 
     sequence: SeqGenerator<u32>,
@@ -272,7 +272,7 @@ impl Spirc {
         config: ConnectConfig,
         session: Session,
         credentials: Credentials,
-        player: Player,
+        player: Option<Player>,
         mixer: Box<dyn Mixer>,
     ) -> Result<(Spirc, impl Future<Output = ()>), Error> {
         let spirc_id = SPIRC_COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -352,7 +352,7 @@ impl Spirc {
 
         let device = initial_device_state(config);
 
-        let player_events = player.get_player_event_channel();
+        let player_events = player.as_ref().map(|p| p.get_player_event_channel());
 
         let mut task = SpircTask {
             player,
@@ -373,7 +373,7 @@ impl Spirc {
             user_attributes_mutation,
             sender,
             commands: Some(cmd_rx),
-            player_events: Some(player_events),
+            player_events,
 
             shutdown: false,
             session,
@@ -552,7 +552,7 @@ impl SpircTask {
                             };
                         },
                         Err(err) => {
-                            error!("ContextError: {:?}", err)
+                            error!("ContextError for {context_uri}: {:?}", err)
                         }
                     }
                 },
@@ -819,13 +819,15 @@ impl SpircTask {
                 );
 
                 if key == "filter-explicit-content" && new_value == "1" {
-                    self.player
-                        .emit_filter_explicit_content_changed_event(matches!(new_value, "1"));
+                    if let Some(player) = &self.player {
+                        player.emit_filter_explicit_content_changed_event(matches!(new_value, "1"));
+                    }
                 }
 
                 if key == "autoplay" && old_value != new_value {
-                    self.player
-                        .emit_auto_play_changed_event(matches!(new_value, "1"));
+                    if let Some(player) = &self.player {
+                        player.emit_auto_play_changed_event(matches!(new_value, "1"));
+                    }
                 }
             } else {
                 trace!(
@@ -864,12 +866,14 @@ impl SpircTask {
         let new_client_id = self.session.client_id();
 
         if self.device.is_active() && new_client_id != old_client_id {
-            self.player.emit_session_client_changed_event(
-                new_client_id,
-                self.session.client_name(),
-                self.session.client_brand_name(),
-                self.session.client_model_name(),
-            );
+            if let Some(player) = &self.player {
+                player.emit_session_client_changed_event(
+                    new_client_id,
+                    self.session.client_name(),
+                    self.session.client_brand_name(),
+                    self.session.client_model_name(),
+                );
+            }
         }
 
         match update.typ() {
@@ -919,7 +923,9 @@ impl SpircTask {
                 let repeat = update.state.repeat();
                 self.state.set_repeat(repeat);
 
-                self.player.emit_repeat_changed_event(repeat);
+                if let Some(player) = &self.player {
+                    player.emit_repeat_changed_event(repeat);
+                }
 
                 self.notify(None)
             }
@@ -939,7 +945,9 @@ impl SpircTask {
                         self.state.set_playing_track_index(0);
                     }
                 }
-                self.player.emit_shuffle_changed_event(shuffle);
+                if let Some(player) = &self.player {
+                    player.emit_shuffle_changed_event(shuffle);
+                }
 
                 self.notify(None)
             }
@@ -972,7 +980,9 @@ impl SpircTask {
                     if preloading_of_next_track_triggered {
                         // Get the next track_id in the playlist
                         if let Some(track_id) = self.preview_next_track() {
-                            self.player.preload(track_id);
+                            if let Some(player) = &self.player {
+                                player.preload(track_id);
+                            }
                         }
                     }
                 }
@@ -999,43 +1009,52 @@ impl SpircTask {
         }
     }
 
+
     fn handle_disconnect(&mut self) {
         self.device.set_is_active(false);
         self.handle_stop();
 
-        self.player
-            .emit_session_disconnected_event(self.session.connection_id(), self.session.username());
+        if let Some(player) = &self.player {
+            player.emit_session_disconnected_event(
+                self.session.connection_id(),
+                self.session.username(),
+            );
+        }
     }
 
     fn handle_stop(&mut self) {
-        self.player.stop();
+        if let Some(player) = &self.player {
+            player.stop();
+        }
     }
 
     fn handle_activate(&mut self) {
         let now = self.now_ms();
         self.device.set_is_active(true);
         self.device.set_became_active_at(now);
-        self.player
-            .emit_session_connected_event(self.session.connection_id(), self.session.username());
-        self.player.emit_session_client_changed_event(
-            self.session.client_id(),
-            self.session.client_name(),
-            self.session.client_brand_name(),
-            self.session.client_model_name(),
-        );
+        if let Some(player) = &self.player {
+            player.emit_session_connected_event(
+                self.session.connection_id(),
+                self.session.username(),
+            );
+            player.emit_session_client_changed_event(
+                self.session.client_id(),
+                self.session.client_name(),
+                self.session.client_brand_name(),
+                self.session.client_model_name(),
+            );
 
-        self.player
-            .emit_volume_changed_event(self.device.volume() as u16);
+            player.emit_volume_changed_event(self.device.volume() as u16);
 
-        self.player
-            .emit_auto_play_changed_event(self.session.autoplay());
+            player.emit_auto_play_changed_event(self.session.autoplay());
 
-        self.player
-            .emit_filter_explicit_content_changed_event(self.session.filter_explicit_content());
+            player
+                .emit_filter_explicit_content_changed_event(self.session.filter_explicit_content());
 
-        self.player.emit_shuffle_changed_event(self.state.shuffle());
+            player.emit_shuffle_changed_event(self.state.shuffle());
 
-        self.player.emit_repeat_changed_event(self.state.repeat());
+            player.emit_repeat_changed_event(self.state.repeat());
+        }
     }
 
     fn handle_load(&mut self, state: &State) -> Result<(), Error> {
@@ -1069,7 +1088,9 @@ impl SpircTask {
                 position_ms,
                 preloading_of_next_track_triggered,
             } => {
-                self.player.play();
+                if let Some(player) = &self.player {
+                    player.play();
+                }
                 self.state.set_status(PlayStatus::kPlayStatusPlay);
                 self.update_state_position(position_ms);
                 self.play_status = SpircPlayStatus::Playing {
@@ -1078,7 +1099,9 @@ impl SpircTask {
                 };
             }
             SpircPlayStatus::LoadingPause { position_ms } => {
-                self.player.play();
+                if let Some(player) = &self.player {
+                    player.play();
+                }
                 self.play_status = SpircPlayStatus::LoadingPlay { position_ms };
             }
             _ => return,
@@ -1108,7 +1131,9 @@ impl SpircTask {
                 nominal_start_time,
                 preloading_of_next_track_triggered,
             } => {
-                self.player.pause();
+                if let Some(player) = &self.player {
+                    player.pause();
+                }
                 self.state.set_status(PlayStatus::kPlayStatusPause);
                 let position_ms = (self.now_ms() - nominal_start_time) as u32;
                 self.update_state_position(position_ms);
@@ -1118,7 +1143,9 @@ impl SpircTask {
                 };
             }
             SpircPlayStatus::LoadingPlay { position_ms } => {
-                self.player.pause();
+                if let Some(player) = &self.player {
+                    player.pause();
+                }
                 self.play_status = SpircPlayStatus::LoadingPause { position_ms };
             }
             _ => (),
@@ -1127,7 +1154,9 @@ impl SpircTask {
 
     fn handle_seek(&mut self, position_ms: u32) {
         self.update_state_position(position_ms);
-        self.player.seek(position_ms);
+        if let Some(player) = &self.player {
+            player.seek(position_ms);
+        }
         let now = self.now_ms();
         match self.play_status {
             SpircPlayStatus::Stopped => (),
@@ -1182,7 +1211,9 @@ impl SpircTask {
         }
 
         if let Some(track_id) = self.preview_next_track() {
-            self.player.preload(track_id);
+            if let Some(player) = &self.player {
+                player.preload(track_id);
+            }
         } else {
             self.handle_stop();
         }
@@ -1242,7 +1273,9 @@ impl SpircTask {
                 self.autoplay_context = true;
                 self.resolve_context = Some(self.state.context_uri().to_owned());
                 self.update_tracks_from_context();
-                self.player.set_auto_normalise_as_album(false);
+                if let Some(player) = &self.player {
+                    player.set_auto_normalise_as_album(false);
+                }
             } else {
                 new_index = 0;
                 continue_playing &= self.state.repeat();
@@ -1367,8 +1400,9 @@ impl SpircTask {
         self.autoplay_context = false;
         self.resolve_context = Some(context_uri.to_owned());
 
-        self.player
-            .set_auto_normalise_as_album(context_uri.starts_with("spotify:album:"));
+        if let Some(player) = &self.player {
+            player.set_auto_normalise_as_album(context_uri.starts_with("spotify:album:"));
+        }
 
         self.state.set_playing_track_index(index);
         self.state.track = tracks.to_vec();
@@ -1462,7 +1496,9 @@ impl SpircTask {
             Some((track, index)) => {
                 self.state.set_playing_track_index(index);
 
-                self.play_request_id = Some(self.player.load(track, start_playing, position_ms));
+                if let Some(ref mut player) = self.player {
+                    self.play_request_id = Some(player.load(track, start_playing, position_ms));
+                }
 
                 self.update_state_position(position_ms);
                 if start_playing {
@@ -1512,7 +1548,9 @@ impl SpircTask {
                 cache.save_volume(volume)
             }
             if self.device.is_active() {
-                self.player.emit_volume_changed_event(volume);
+                if let Some(player) = &self.player {
+                    player.emit_volume_changed_event(volume);
+                }
             }
         }
     }
