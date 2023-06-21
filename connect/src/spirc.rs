@@ -28,7 +28,7 @@ use crate::{
     protocol::{
         self,
         explicit_content_pubsub::UserAttributesUpdate,
-        spirc::{DeviceState, Frame, MessageType, PlayStatus, State, TrackRef},
+        spirc::{Capability, DeviceState, Frame, MessageType, PlayStatus, State, TrackRef},
         user_attributes::UserAttributesMutation,
     },
 };
@@ -76,7 +76,7 @@ enum SpircPlayStatus {
 
 #[derive(Debug, Clone)]
 pub enum SpircEvent {
-    ActiveDevice(DeviceState),
+    ActiveDevice{ name: String, capabilities: Vec<Capability> },
     ContextUri(String),
     Playing(bool),
     PlayingIndex(u32),
@@ -1044,8 +1044,10 @@ impl SpircTask {
 
             if self.device.name.ne(&device_state.name) && device_state.is_active() {
                 trace!("active device updated");
-                self.device = (*device_state).clone();
-                updates.push(SpircEvent::ActiveDevice(*device_state))
+                updates.push(SpircEvent::ActiveDevice {
+                    name: device_state.name().to_string(),
+                    capabilities: device_state.capabilities,
+                })
             }
         }
 

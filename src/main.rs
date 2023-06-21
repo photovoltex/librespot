@@ -1800,7 +1800,7 @@ async fn main() {
                             SpircEvent::ContextUri(context) => info!("updated context: {context}"),
                             SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
                             SpircEvent::Position{ ms, measured_at } => info!("updated position: {ms} at {measured_at}"),
-                            SpircEvent::ActiveDevice(device) => info!("updated active device: {}", device.name()),
+                            SpircEvent::ActiveDevice{ name, .. } => info!("device '{name}' is active"),
                         })
                     },
                     None => info!("no event")
