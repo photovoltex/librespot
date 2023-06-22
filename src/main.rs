@@ -10,11 +10,11 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use librespot_connect::spirc::SpircEvent;
+use librespot_connect::spirc::{SpircEvent, SpircEventChannel};
+use librespot_protocol::spirc::{State, DeviceState};
 use log::{error, info, trace, warn};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
-use tokio::sync::mpsc::UnboundedReceiver;
 use url::Url;
 
 use librespot::{
@@ -1659,11 +1659,14 @@ async fn main() {
     let mut last_credentials = None;
     let mut spirc: Option<Spirc> = None;
     let mut spirc_task: Option<Pin<_>> = None;
-    let mut event_rx: Option<UnboundedReceiver<Vec<SpircEvent>>> = None;
+    let mut event_rx: Option<SpircEventChannel> = None;
     let mut auto_connect_times: Vec<Instant> = vec![];
     let mut discovery = None;
     let mut connecting = false;
     let mut _event_handler: Option<EventHandler> = None;
+
+    let mut state: Option<State> = None;
+    let mut device_state: Option<DeviceState> = None;
 
     let mut session = Session::new(setup.session_config.clone(), setup.cache.clone());
 
@@ -1790,19 +1793,18 @@ async fn main() {
                 event_rx.as_mut().expect("to be some some").recv().await
             }, if event_rx.is_some() => {
                 match events {
-                    Some(events) => {
-                        events.into_iter().for_each(|event| match event {
-                            SpircEvent::Tacks(tracks) => info!("updated tracks: {}",tracks.len()),
-                            SpircEvent::Volume(volume) => info!("updated volume: {volume}"),
-                            SpircEvent::PlayingIndex(index) => info!("updated index: {index}"),
-                            SpircEvent::Repeat(repeat) => info!("updated repeat: {repeat}"),
-                            SpircEvent::Shuffle(shuffle) => info!("updated shuffle: {shuffle}"),
-                            SpircEvent::ContextUri(context) => info!("updated context: {context}"),
-                            SpircEvent::Playing(playing) => info!("updated playing: {playing}"),
-                            SpircEvent::Position{ ms, measured_at } => info!("updated position: {ms} at {measured_at}"),
-                            SpircEvent::ActiveDevice{ name, .. } => info!("device '{name}' is active"),
-                        })
-                    },
+                    Some(events) => match (events, &state, &device_state) {
+                        (SpircEvent::Playback(new), Some(s), _) if s.track.ne(&new.track) => {
+                            log::info!("tracks updated: {}", new.track.len());
+                            state = Some(new)
+                        }
+                        (SpircEvent::Playback(new), ..) => state = Some(new),
+                        (SpircEvent::Device(new), _, Some(d)) if d.volume().ne(&new.volume()) => {
+                            log::info!("volume updated: {}", new.volume());
+                            device_state = Some(new)
+                        }
+                        (SpircEvent::Device(new), ..) => device_state = Some(new)
+                    }
                     None => info!("no event")
                 }
             },

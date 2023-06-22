@@ -28,7 +28,7 @@ use crate::{
     protocol::{
         self,
         explicit_content_pubsub::UserAttributesUpdate,
-        spirc::{Capability, DeviceState, Frame, MessageType, PlayStatus, State, TrackRef},
+        spirc::{DeviceState, Frame, MessageType, PlayStatus, State, TrackRef},
         user_attributes::UserAttributesMutation,
     },
 };
@@ -76,16 +76,11 @@ enum SpircPlayStatus {
 
 #[derive(Debug, Clone)]
 pub enum SpircEvent {
-    ActiveDevice{ name: String, capabilities: Vec<Capability> },
-    ContextUri(String),
-    Playing(bool),
-    PlayingIndex(u32),
-    Position { ms: u32, measured_at: u64 },
-    Volume(u32),
-    Repeat(bool),
-    Shuffle(bool),
-    Tacks(Vec<TrackRef>),
+    Playback(State),
+    Device(DeviceState)
 }
+
+pub type SpircEventChannel = mpsc::UnboundedReceiver<SpircEvent>;
 
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
 
@@ -107,7 +102,7 @@ struct SpircTask {
     user_attributes_mutation: BoxedStream<Result<UserAttributesMutation, Error>>,
     sender: MercurySender,
     commands: Option<mpsc::UnboundedReceiver<SpircCommand>>,
-    event_sender: Vec<mpsc::UnboundedSender<Vec<SpircEvent>>>,
+    event_sender: Vec<mpsc::UnboundedSender<SpircEvent>>,
     player_events: Option<PlayerEventChannel>,
 
     shutdown: bool,
@@ -138,7 +133,7 @@ pub enum SpircCommand {
     SetVolume(u16),
     Activate,
     Load(SpircLoadCommand),
-    AddEventSender(mpsc::UnboundedSender<Vec<SpircEvent>>),
+    AddEventSender(mpsc::UnboundedSender<SpircEvent>),
 }
 
 #[derive(Debug)]
@@ -417,7 +412,7 @@ impl Spirc {
 
     pub fn get_remote_event_channel(
         &self,
-    ) -> Result<mpsc::UnboundedReceiver<Vec<SpircEvent>>, Error> {
+    ) -> Result<SpircEventChannel, Error> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         self.commands.send(SpircCommand::AddEventSender(event_tx))?;
         Ok(event_rx)
@@ -1012,117 +1007,44 @@ impl SpircTask {
                 self.notify(None)
             }
 
-            // this event is mostly fired if a remote player has control
+            // this event is mostly fired if another player has control and updates others about its state
             MessageType::kMessageTypeNotify => {
                 if self.device.is_active()
                     && update.device_state.is_active()
                     && self.device.became_active_at() <= update.device_state.became_active_at()
                 {
                     self.handle_disconnect();
-                } else if update.state.is_some() && !self.event_sender.is_empty() {
-                    self.handle_remote_events(update)?;
+                    self.notify(None)
+                } else {
+                    if update.state.is_some() && !self.event_sender.is_empty() {
+                        self.handle_remote_events(update);
+                    }
+                    // we shouldn't notify other players if we are currently not active
+                    Ok(())
                 }
 
-                self.notify(None)
+                
             }
 
             _ => Ok(()),
         }
     }
 
-    fn handle_remote_events(&mut self, frame: Frame) -> Result<(), Error> {
-        let mut updates = Vec::new();
-
-        if let Some(device_state) = frame.device_state.0 {
-            if self.device.volume.ne(&device_state.volume) {
-                if let Some(volume) = device_state.volume {
-                    trace!("volume updated");
-                    self.device.volume = device_state.volume;
-                    updates.push(SpircEvent::Volume(volume))
-                }
-            }
-
-            if self.device.name.ne(&device_state.name) && device_state.is_active() {
-                trace!("active device updated");
-                updates.push(SpircEvent::ActiveDevice {
-                    name: device_state.name().to_string(),
-                    capabilities: device_state.capabilities,
-                })
-            }
-        }
-
-        let initial_state = &self.state;
+    fn handle_remote_events(&mut self, frame: Frame) {
         let MessageField(state) = frame.state;
+        let MessageField(device_state) = frame.device_state;
+
         if let Some(state) = state {
-            if initial_state
-                .playing_track_index
-                .ne(&state.playing_track_index)
-            {
-                if let Some(playing_track_index) = state.playing_track_index {
-                    trace!("plating_index updated");
-                    updates.push(SpircEvent::PlayingIndex(playing_track_index))
-                }
-            }
-
-            if initial_state.repeat.ne(&state.repeat) {
-                if let Some(repeat) = state.repeat {
-                    trace!("repeat updated");
-                    updates.push(SpircEvent::Repeat(repeat))
-                }
-            }
-
-            if initial_state.shuffle.ne(&state.shuffle) {
-                if let Some(shuffle) = state.shuffle {
-                    trace!("shuffle updated");
-                    updates.push(SpircEvent::Shuffle(shuffle))
-                }
-            }
-
-            if initial_state.context_uri.ne(&state.context_uri) {
-                if let Some(context_uri) = state.context_uri.clone() {
-                    trace!("context updated");
-                    updates.push(SpircEvent::ContextUri(context_uri))
-                }
-            }
-
-            if initial_state.track.ne(&state.track) {
-                trace!("tracks updated");
-                updates.push(SpircEvent::Tacks(state.track.clone()))
-            }
-
-            if initial_state.status.ne(&state.status) {
-                if let Some(status) = state.status {
-                    if let Ok(status) = status.enum_value() {
-                        let playing = match status {
-                            PlayStatus::kPlayStatusStop | PlayStatus::kPlayStatusPause => false,
-                            PlayStatus::kPlayStatusPlay | PlayStatus::kPlayStatusLoading => true,
-                        };
-                        updates.push(SpircEvent::Playing(playing))
-                    }
-                }
-            }
-
-            if initial_state.position_ms.ne(&state.position_ms) {
-                if let (Some(position_ms), Some(position_measured_at)) =
-                    (state.position_ms, state.position_measured_at)
-                {
-                    trace!("position updated");
-                    updates.push(SpircEvent::Position {
-                        ms: position_ms,
-                        measured_at: position_measured_at,
-                    });
-                }
-            }
-
-            if initial_state.ne(&state) {
-                trace!("state updated");
-                self.state = *state;
-                self.event_sender
-                    .retain(|sender| sender.send(updates.clone()).is_ok());
-            }
+            let update = SpircEvent::Playback(*state);
+            self.event_sender
+                .retain(|sender| sender.send(update.clone()).is_ok());
         }
 
-        Ok(())
+        if let Some(device_state) = device_state {
+            let update = SpircEvent::Device(*device_state);
+            self.event_sender
+                .retain(|sender| sender.send(update.clone()).is_ok());
+        }
     }
 
     fn handle_disconnect(&mut self) {
