@@ -1774,7 +1774,7 @@ async fn main() {
                     }
                 };
 
-                let (event_rx_, spirc_, spirc_task_) = match Spirc::new(connect_config, session.clone(), last_credentials.clone().unwrap_or_default(), player, mixer).await {
+                let (event_rx_, spirc_, spirc_task_) = match Spirc::new(connect_config, session.clone(), last_credentials.clone().unwrap_or_default(), Some(player), mixer).await {
                     Ok((spirc_, spirc_task_)) => (spirc_.get_remote_event_channel(), spirc_, spirc_task_),
                     Err(e) => {
                         error!("could not initialize spirc: {}", e);
