@@ -11,7 +11,7 @@ use std::{
 
 use futures_util::StreamExt;
 use librespot_connect::spirc::{SpircEvent, SpircEventChannel};
-use librespot_protocol::spirc::{State, DeviceState};
+use librespot_protocol::spirc::{DeviceState, State};
 use log::{error, info, trace, warn};
 use sha1::{Digest, Sha1};
 use thiserror::Error;

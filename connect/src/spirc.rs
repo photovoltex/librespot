@@ -77,7 +77,7 @@ enum SpircPlayStatus {
 #[derive(Debug, Clone)]
 pub enum SpircEvent {
     Playback(State),
-    Device(DeviceState)
+    Device(DeviceState),
 }
 
 pub type SpircEventChannel = mpsc::UnboundedReceiver<SpircEvent>;
@@ -410,9 +410,7 @@ impl Spirc {
         Ok((spirc, task.run()))
     }
 
-    pub fn get_remote_event_channel(
-        &self,
-    ) -> Result<SpircEventChannel, Error> {
+    pub fn get_remote_event_channel(&self) -> Result<SpircEventChannel, Error> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         self.commands.send(SpircCommand::AddEventSender(event_tx))?;
         Ok(event_rx)
@@ -1016,14 +1014,12 @@ impl SpircTask {
                     self.handle_disconnect();
                     self.notify(None)
                 } else {
-                    if update.state.is_some() && !self.event_sender.is_empty() {
+                    if !self.event_sender.is_empty() {
                         self.handle_remote_events(update);
                     }
                     // we shouldn't notify other players if we are currently not active
                     Ok(())
                 }
-
-                
             }
 
             _ => Ok(()),
