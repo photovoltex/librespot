@@ -24,10 +24,7 @@ use symphonia::core::io::MediaSource;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    audio::{
-        AudioDecrypt, AudioFile, StreamLoaderController, READ_AHEAD_BEFORE_PLAYBACK,
-        READ_AHEAD_DURING_PLAYBACK,
-    },
+    audio::{AudioDecrypt, AudioFetchParams, AudioFile, StreamLoaderController},
     audio_backend::Sink,
     config::{Bitrate, NormalisationMethod, NormalisationType, PlayerConfig},
     convert::Converter,
@@ -55,7 +52,6 @@ pub type PlayerResult = Result<(), Error>;
 pub struct Player {
     commands: Option<mpsc::UnboundedSender<PlayerCommand>>,
     thread_handle: Option<thread::JoinHandle<()>>,
-    play_request_id_generator: SeqGenerator<u64>,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -88,6 +84,7 @@ struct PlayerInternal {
     auto_normalise_as_album: bool,
 
     player_id: usize,
+    play_request_id_generator: SeqGenerator<u64>,
 }
 
 static PLAYER_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -95,7 +92,6 @@ static PLAYER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 enum PlayerCommand {
     Load {
         track_id: SpotifyId,
-        play_request_id: u64,
         play: bool,
         position_ms: u32,
     },
@@ -106,6 +102,7 @@ enum PlayerCommand {
     Pause,
     Stop,
     Seek(u32),
+    SetSession(Session),
     AddEventSender(mpsc::UnboundedSender<PlayerEvent>),
     SetSinkEventCallback(Option<SinkEventCallback>),
     EmitVolumeChangedEvent(u16),
@@ -132,6 +129,10 @@ enum PlayerCommand {
 
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
+    // Play request id changed
+    PlayRequestIdChanged {
+        play_request_id: u64,
+    },
     // Fired when the player is stopped (e.g. by issuing a "stop" command to the player).
     Stopped {
         play_request_id: u64,
@@ -382,7 +383,7 @@ impl NormalisationData {
                 let limiting_db = factor_db + config.normalisation_threshold_dbfs.abs();
 
                 warn!(
-                    "This track may exceed dBFS by {:.2} dB and be subject to {:.2} dB of dynamic limiting at it's peak.",
+                    "This track may exceed dBFS by {:.2} dB and be subject to {:.2} dB of dynamic limiting at its peak.",
                     factor_db, limiting_db
                 );
             } else if factor > threshold_ratio {
@@ -391,7 +392,7 @@ impl NormalisationData {
                     + config.normalisation_threshold_dbfs.abs();
 
                 info!(
-                    "This track may be subject to {:.2} dB of dynamic limiting at it's peak.",
+                    "This track may be subject to {:.2} dB of dynamic limiting at its peak.",
                     limiting_db
                 );
             }
@@ -416,7 +417,7 @@ impl Player {
         session: Session,
         volume_getter: Box<dyn VolumeGetter + Send>,
         sink_builder: F,
-    ) -> Self
+    ) -> Arc<Self>
     where
         F: FnOnce() -> Box<dyn Sink> + Send + 'static,
     {
@@ -475,6 +476,7 @@ impl Player {
                 auto_normalise_as_album: false,
 
                 player_id,
+                play_request_id_generator: SeqGenerator::new(0),
             };
 
             // While PlayerInternal is written as a future, it still contains blocking code.
@@ -485,11 +487,17 @@ impl Player {
             debug!("PlayerInternal thread finished.");
         });
 
-        Self {
+        Arc::new(Self {
             commands: Some(cmd_tx),
             thread_handle: Some(handle),
-            play_request_id_generator: SeqGenerator::new(0),
+        })
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        if let Some(handle) = self.thread_handle.as_ref() {
+            return handle.is_finished();
         }
+        true
     }
 
     fn command(&self, cmd: PlayerCommand) {
@@ -500,16 +508,12 @@ impl Player {
         }
     }
 
-    pub fn load(&mut self, track_id: SpotifyId, start_playing: bool, position_ms: u32) -> u64 {
-        let play_request_id = self.play_request_id_generator.get();
+    pub fn load(&self, track_id: SpotifyId, start_playing: bool, position_ms: u32) {
         self.command(PlayerCommand::Load {
             track_id,
-            play_request_id,
             play: start_playing,
             position_ms,
         });
-
-        play_request_id
     }
 
     pub fn preload(&self, track_id: SpotifyId) {
@@ -530,6 +534,10 @@ impl Player {
 
     pub fn seek(&self, position_ms: u32) {
         self.command(PlayerCommand::Seek(position_ms));
+    }
+
+    pub fn set_session(&self, session: Session) {
+        self.command(PlayerCommand::SetSession(session));
     }
 
     pub fn get_player_event_channel(&self) -> PlayerEventChannel {
@@ -1379,10 +1387,6 @@ impl Future for PlayerInternal {
                 }
             }
 
-            if self.session.is_invalid() {
-                return Poll::Ready(());
-            }
-
             if (!self.state.is_playing()) && all_futures_completed_or_not_ready {
                 return Poll::Pending;
             }
@@ -1754,10 +1758,15 @@ impl PlayerInternal {
     fn handle_command_load(
         &mut self,
         track_id: SpotifyId,
-        play_request_id: u64,
+        play_request_id_option: Option<u64>,
         play: bool,
         position_ms: u32,
     ) -> PlayerResult {
+        let play_request_id =
+            play_request_id_option.unwrap_or(self.play_request_id_generator.get());
+
+        self.send_event(PlayerEvent::PlayRequestIdChanged { play_request_id });
+
         if !self.config.gapless {
             self.ensure_sink_stopped(play);
         }
@@ -1898,10 +1907,6 @@ impl PlayerInternal {
             }
         }
 
-        // We need to load the track - either from scratch or by completing a preload.
-        // In any case we go into a Loading state to load the track.
-        self.ensure_sink_stopped(play);
-
         self.send_event(PlayerEvent::Loading {
             track_id,
             play_request_id,
@@ -2010,7 +2015,7 @@ impl PlayerInternal {
         {
             return self.handle_command_load(
                 track_id,
-                play_request_id,
+                Some(play_request_id),
                 start_playback,
                 position_ms,
             );
@@ -2067,10 +2072,9 @@ impl PlayerInternal {
         match cmd {
             PlayerCommand::Load {
                 track_id,
-                play_request_id,
                 play,
                 position_ms,
-            } => self.handle_command_load(track_id, play_request_id, play, position_ms)?,
+            } => self.handle_command_load(track_id, None, play, position_ms)?,
 
             PlayerCommand::Preload { track_id } => self.handle_command_preload(track_id),
 
@@ -2081,6 +2085,8 @@ impl PlayerInternal {
             PlayerCommand::Pause => self.handle_pause(),
 
             PlayerCommand::Stop => self.handle_player_stop(),
+
+            PlayerCommand::SetSession(session) => self.session = session,
 
             PlayerCommand::AddEventSender(sender) => self.event_senders.push(sender),
 
@@ -2214,13 +2220,14 @@ impl PlayerInternal {
             ..
         } = self.state
         {
+            let read_ahead_during_playback = AudioFetchParams::get().read_ahead_during_playback;
             // Request our read ahead range
             let request_data_length =
-                (READ_AHEAD_DURING_PLAYBACK.as_secs_f32() * bytes_per_second as f32) as usize;
+                (read_ahead_during_playback.as_secs_f32() * bytes_per_second as f32) as usize;
 
             // Request the part we want to wait for blocking. This effectively means we wait for the previous request to partially complete.
             let wait_for_data_length =
-                (READ_AHEAD_BEFORE_PLAYBACK.as_secs_f32() * bytes_per_second as f32) as usize;
+                (read_ahead_during_playback.as_secs_f32() * bytes_per_second as f32) as usize;
 
             stream_loader_controller
                 .fetch_next_and_wait(request_data_length, wait_for_data_length)
@@ -2272,6 +2279,7 @@ impl fmt::Debug for PlayerCommand {
             PlayerCommand::Pause => f.debug_tuple("Pause").finish(),
             PlayerCommand::Stop => f.debug_tuple("Stop").finish(),
             PlayerCommand::Seek(position) => f.debug_tuple("Seek").field(&position).finish(),
+            PlayerCommand::SetSession(_) => f.debug_tuple("SetSession").finish(),
             PlayerCommand::AddEventSender(_) => f.debug_tuple("AddEventSender").finish(),
             PlayerCommand::SetSinkEventCallback(_) => {
                 f.debug_tuple("SetSinkEventCallback").finish()

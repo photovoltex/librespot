@@ -3,6 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::atomic::{AtomicUsize, Ordering},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -85,8 +86,8 @@ pub type SpircEventChannel = mpsc::UnboundedReceiver<SpircEvent>;
 type BoxedStream<T> = Pin<Box<dyn FusedStream<Item = T> + Send>>;
 
 struct SpircTask {
-    player: Option<Player>,
-    mixer: Box<dyn Mixer>,
+    player: Option<Arc<Player>>,
+    mixer: Arc<dyn Mixer>,
 
     sequence: SeqGenerator<u32>,
 
@@ -284,8 +285,8 @@ impl Spirc {
         config: ConnectConfig,
         session: Session,
         credentials: Credentials,
-        player: Option<Player>,
-        mixer: Box<dyn Mixer>,
+        player: Option<Arc<Player>>,
+        mixer: Arc<dyn Mixer>,
     ) -> Result<(Spirc, impl Future<Output = ()>), Error> {
         let spirc_id = SPIRC_COUNTER.fetch_add(1, Ordering::AcqRel);
         debug!("new Spirc[{}]", spirc_id);
@@ -685,6 +686,11 @@ impl SpircTask {
     }
 
     fn handle_player_event(&mut self, event: PlayerEvent) -> Result<(), Error> {
+        // update play_request_id
+        if let PlayerEvent::PlayRequestIdChanged { play_request_id } = event {
+            self.play_request_id = Some(play_request_id);
+            return Ok(());
+        }
         // we only process events if the play_request_id matches. If it doesn't, it is
         // an event that belongs to a previous track and only arrives now due to a race
         // condition. In this case we have updated the state already and don't want to
@@ -1455,7 +1461,6 @@ impl SpircTask {
         // has_shuffle/repeat seem to always be true in these replace msgs,
         // but to replicate the behaviour of the Android client we have to
         // ignore false values.
-        let state = state;
         if state.repeat() {
             self.state.set_repeat(true);
         }
@@ -1542,7 +1547,7 @@ impl SpircTask {
                 self.state.set_playing_track_index(index);
 
                 if let Some(ref mut player) = self.player {
-                    self.play_request_id = Some(player.load(track, start_playing, position_ms));
+                    player.load(track, start_playing, position_ms);
                 }
 
                 self.update_state_position(position_ms);

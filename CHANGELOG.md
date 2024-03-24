@@ -36,9 +36,12 @@ https://github.com/librespot-org/librespot
 - [all] `chrono` replaced with `time` (breaking)
 - [all] `time` updated (CVE-2020-26235)
 - [all] Improve lock contention and performance (breaking)
+- [all] Use a single `player` instance. Eliminates occasional `player` and
+  `audio backend` restarts, which can cause issues with some playback
+  configurations.
 - [audio] Files are now downloaded over the HTTPS CDN (breaking)
 - [audio] Improve file opening and seeking performance (breaking)
-- [core] MSRV is now 1.65 (breaking)
+- [core] MSRV is now 1.70 (breaking)
 - [connect] `DeviceType` moved out of `connect` into `core` (breaking)
 - [connect] Update and expose all `spirc` context fields (breaking)
 - [connect] Add `Clone, Defaut` traits to `spirc` contexts
@@ -98,6 +101,7 @@ https://github.com/librespot-org/librespot
 - [playback] Add metadata support via a `TrackChanged` event
 - [connect] Add `activate` and `load` functions to `Spirc`, allowing control over local connect sessions
 - [metadata] Add `Lyrics`
+- [discovery] Add discovery initialisation retries if within the 1st min of uptime
 
 ### Fixed
 

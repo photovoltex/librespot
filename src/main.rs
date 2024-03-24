@@ -1,3 +1,9 @@
+use data_encoding::HEXLOWER;
+use futures_util::StreamExt;
+use log::{debug, error, info, trace, warn};
+use librespot_connect::spirc::{SpircEvent, SpircEventChannel};
+use librespot_protocol::spirc::{DeviceState, State};
+use sha1::{Digest, Sha1};
 use std::{
     env,
     fs::create_dir_all,
@@ -8,12 +14,7 @@ use std::{
     str::FromStr,
     time::{Duration, Instant},
 };
-
-use futures_util::StreamExt;
-use librespot_connect::spirc::{SpircEvent, SpircEventChannel};
-use librespot_protocol::spirc::{DeviceState, State};
-use log::{error, info, trace, warn};
-use sha1::{Digest, Sha1};
+use sysinfo::{System, SystemExt};
 use thiserror::Error;
 use url::Url;
 
@@ -41,7 +42,7 @@ mod player_event_handler;
 use player_event_handler::{run_program_on_sink_events, EventHandler};
 
 fn device_id(name: &str) -> String {
-    hex::encode(Sha1::digest(name.as_bytes()))
+    HEXLOWER.encode(&Sha1::digest(name.as_bytes()))
 }
 
 fn usage(program: &str, opts: &getopts::Options) -> String {
@@ -1668,6 +1669,7 @@ fn get_setup() -> Setup {
 async fn main() {
     const RUST_BACKTRACE: &str = "RUST_BACKTRACE";
     const RECONNECT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(600);
+    const DISCOVERY_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
     const RECONNECT_RATE_LIMIT: usize = 5;
 
     if env::var(RUST_BACKTRACE).is_err() {
@@ -1690,18 +1692,43 @@ async fn main() {
 
     let mut session = Session::new(setup.session_config.clone(), setup.cache.clone());
 
+    let mut sys = System::new();
+
     if setup.enable_discovery {
-        let device_id = setup.session_config.device_id.clone();
-        let client_id = setup.session_config.client_id.clone();
-        match librespot::discovery::Discovery::builder(device_id, client_id)
-            .name(setup.connect_config.name.clone())
-            .device_type(setup.connect_config.device_type)
-            .port(setup.zeroconf_port)
-            .zeroconf_ip(setup.zeroconf_ip)
-            .launch()
-        {
-            Ok(d) => discovery = Some(d),
-            Err(err) => warn!("Could not initialise discovery: {}.", err),
+        // When started at boot as a service discovery may fail due to it
+        // trying to bind to interfaces before the network is actually up.
+        // This could be prevented in systemd by starting the service after
+        // network-online.target but it requires that a wait-online.service is
+        // also enabled which is not always the case since a wait-online.service
+        // can potentially hang the boot process until it times out in certain situations.
+        // This allows for discovery to retry every 10 secs in the 1st min of uptime
+        // before giving up thus papering over the issue and not holding up the boot process.
+
+        discovery = loop {
+            let device_id = setup.session_config.device_id.clone();
+            let client_id = setup.session_config.client_id.clone();
+
+            match librespot::discovery::Discovery::builder(device_id, client_id)
+                .name(setup.connect_config.name.clone())
+                .device_type(setup.connect_config.device_type)
+                .port(setup.zeroconf_port)
+                .zeroconf_ip(setup.zeroconf_ip.clone())
+                .launch()
+            {
+                Ok(d) => break Some(d),
+                Err(e) => {
+                    sys.refresh_processes();
+
+                    if sys.uptime() <= 1 {
+                        debug!("Retrying to initialise discovery: {e}");
+                        tokio::time::sleep(DISCOVERY_RETRY_TIMEOUT).await;
+                    } else {
+                        debug!("System uptime > 1 min, not retrying to initialise discovery");
+                        warn!("Could not initialise discovery: {e}");
+                        break None;
+                    }
+                }
+            }
         };
     }
 
@@ -1713,6 +1740,31 @@ async fn main() {
             "Discovery is unavailable and no credentials provided. Authentication is not possible."
         );
         exit(1);
+    }
+
+    let mixer_config = setup.mixer_config.clone();
+    let mixer = (setup.mixer)(mixer_config);
+    let player_config = setup.player_config.clone();
+
+    let soft_volume = mixer.get_soft_volume();
+    let format = setup.format;
+    let backend = setup.backend;
+    let device = setup.device.clone();
+    let player = Player::new(player_config, session.clone(), soft_volume, move || {
+        (backend)(device, format)
+    });
+
+    if let Some(player_event_program) = setup.player_event_program.clone() {
+        _event_handler = Some(EventHandler::new(
+            player.get_player_event_channel(),
+            &player_event_program,
+        ));
+
+        if setup.emit_sink_events {
+            player.set_sink_event_callback(Some(Box::new(move |sink_status| {
+                run_program_on_sink_events(sink_status, &player_event_program)
+            })));
+        }
     }
 
     loop {
@@ -1737,6 +1789,9 @@ async fn main() {
                             // Continue shutdown in its own task
                             tokio::spawn(spirc_task);
                         }
+                        if !session.is_invalid() {
+                            session.shutdown();
+                        }
 
                         connecting = true;
                     },
@@ -1749,32 +1804,16 @@ async fn main() {
             _ = async {}, if connecting && last_credentials.is_some() => {
                 if session.is_invalid() {
                     session = Session::new(setup.session_config.clone(), setup.cache.clone());
+                    player.set_session(session.clone());
                 }
 
-                let mixer_config = setup.mixer_config.clone();
-                let mixer = (setup.mixer)(mixer_config);
-                let player_config = setup.player_config.clone();
                 let connect_config = setup.connect_config.clone();
 
-                let soft_volume = mixer.get_soft_volume();
-                let format = setup.format;
-                let backend = setup.backend;
-                let device = setup.device.clone();
-                let player = Player::new(player_config, session.clone(), soft_volume, move || {
-                    (backend)(device, format)
-                });
-
-                if let Some(player_event_program) = setup.player_event_program.clone() {
-                    _event_handler = Some(EventHandler::new(player.get_player_event_channel(), &player_event_program));
-
-                    if setup.emit_sink_events {
-                        player.set_sink_event_callback(Some(Box::new(move |sink_status| {
-                            run_program_on_sink_events(sink_status, &player_event_program)
-                        })));
-                    }
-                };
-
-                let (event_rx_, spirc_, spirc_task_) = match Spirc::new(connect_config, session.clone(), last_credentials.clone().unwrap_or_default(), Some(player), mixer).await {
+                let (event_rx_, spirc_, spirc_task_) = match Spirc::new(connect_config,
+                                                                session.clone(),
+                                                                last_credentials.clone().unwrap_or_default(),
+                                                                Some(player.clone()),
+                                                                mixer.clone()).await {
                     Ok((spirc_, spirc_task_)) => (spirc_.get_remote_event_channel(), spirc_, spirc_task_),
                     Err(e) => {
                         error!("could not initialize spirc: {}", e);
@@ -1803,11 +1842,18 @@ async fn main() {
 
                 if last_credentials.is_some() && !reconnect_exceeds_rate_limit() {
                     auto_connect_times.push(Instant::now());
+                    if !session.is_invalid() {
+                        session.shutdown();
+                    }
                     connecting = true;
                 } else {
                     error!("Spirc shut down too often. Not reconnecting automatically.");
                     exit(1);
                 }
+            },
+            _ = async {}, if player.is_invalid() => {
+                error!("Player shut down unexpectedly");
+                exit(1);
             },
             events = async {
                 event_rx.as_mut().expect("to be some some").recv().await
