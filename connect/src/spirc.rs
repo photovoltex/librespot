@@ -82,6 +82,7 @@ struct SpircTask {
 
     connect_state: ConnectState,
 
+    #[deprecated]
     state: State,
     play_request_id: Option<u64>,
     play_status: SpircPlayStatus,
@@ -99,6 +100,8 @@ struct SpircTask {
     session: Session,
     resolve_context: Option<String>,
     autoplay_context: bool,
+
+    context_index: usize,
     context: Option<ContextPage>,
 
     spirc_id: usize,
@@ -117,7 +120,8 @@ pub enum SpircCommand {
     VolumeDown,
     Shutdown,
     Shuffle(bool),
-    Repeat(bool),
+    RepeatTrack(bool),
+    RepeatContext(bool),
     Disconnect,
     SetPosition(u32),
     SetVolume(u16),
@@ -212,6 +216,8 @@ impl Spirc {
                 }),
         );
 
+        // todo: we also need to listen to, hm://connect-state/v1/connect/volume => sends our volume updates from remote
+
         let connect_state_command = Box::pin(
             session
                 .dealer()
@@ -274,6 +280,7 @@ impl Spirc {
 
             resolve_context: None,
             autoplay_context: false,
+            context_index: 0,
             context: None,
 
             spirc_id,
@@ -312,7 +319,10 @@ impl Spirc {
         Ok(self.commands.send(SpircCommand::Shuffle(shuffle))?)
     }
     pub fn repeat(&self, repeat: bool) -> Result<(), Error> {
-        Ok(self.commands.send(SpircCommand::Repeat(repeat))?)
+        Ok(self.commands.send(SpircCommand::RepeatContext(repeat))?)
+    }
+    pub fn repeat_track(&self, repeat: bool) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::RepeatTrack(repeat))?)
     }
     pub fn set_volume(&self, volume: u16) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::SetVolume(volume))?)
@@ -409,9 +419,7 @@ impl SpircTask {
                     let context = if context_uri.starts_with("hm://") {
                         self.session.spclient().get_next_page(&context_uri).await
                     } else {
-                        // only send previous tracks that were before the current playback position
-                        let current_position = self.state.playing_track_index() as usize;
-                        let previous_tracks = self.state.track[..current_position].iter().filter_map(|t| SpotifyId::try_from(t).ok()).collect();
+                        let previous_tracks = self.connect_state.player.prev_tracks.iter().map(SpotifyId::try_from).filter_map(Result::ok).collect();
 
                         let scope = if self.autoplay_context {
                             "stations" // this returns a `StationContext` but we deserialize it into a `PageContext`
@@ -429,7 +437,7 @@ impl SpircTask {
                                     info!(
                                         "Resolved {:?} tracks from <{:?}>",
                                         context.tracks.len(),
-                                        self.state.context_uri(),
+                                        self.connect_state.player.context_uri,
                                     );
                                     Some(context.into())
                                 }
@@ -467,8 +475,7 @@ impl SpircTask {
     async fn handle_command(&mut self, cmd: SpircCommand) -> Result<(), Error> {
         if matches!(cmd, SpircCommand::Shutdown) {
             trace!("Received SpircCommand::Shutdown");
-            todo!("signal shutdown to spotify");
-            self.handle_disconnect();
+            self.handle_disconnect().await?;
             self.shutdown = true;
             if let Some(rx) = self.commands.as_mut() {
                 rx.close()
@@ -506,15 +513,19 @@ impl SpircTask {
                     self.notify().await
                 }
                 SpircCommand::Disconnect => {
-                    self.handle_disconnect();
+                    self.handle_disconnect().await?;
                     self.notify().await
                 }
                 SpircCommand::Shuffle(shuffle) => {
-                    self.state.set_shuffle(shuffle);
+                    self.connect_state.set_shuffle(shuffle);
                     self.notify().await
                 }
-                SpircCommand::Repeat(repeat) => {
-                    self.state.set_repeat(repeat);
+                SpircCommand::RepeatContext(repeat) => {
+                    self.connect_state.set_repeat_context(repeat);
+                    self.notify().await
+                }
+                SpircCommand::RepeatTrack(repeat) => {
+                    self.connect_state.set_repeat_track(repeat);
                     self.notify().await
                 }
                 SpircCommand::SetPosition(position) => {
@@ -564,16 +575,13 @@ impl SpircTask {
                         match self.play_status {
                             SpircPlayStatus::LoadingPlay { position_ms } => {
                                 self.update_state_position(position_ms);
-                                self.state.set_status(PlayStatus::kPlayStatusPlay);
                                 trace!("==> kPlayStatusPlay");
                             }
                             SpircPlayStatus::LoadingPause { position_ms } => {
                                 self.update_state_position(position_ms);
-                                self.state.set_status(PlayStatus::kPlayStatusPause);
                                 trace!("==> kPlayStatusPause");
                             }
                             _ => {
-                                self.state.set_status(PlayStatus::kPlayStatusLoading);
                                 self.update_state_position(0);
                                 trace!("==> kPlayStatusLoading");
                             }
@@ -600,7 +608,6 @@ impl SpircTask {
                             }
                             SpircPlayStatus::LoadingPlay { .. }
                             | SpircPlayStatus::LoadingPause { .. } => {
-                                self.state.set_status(PlayStatus::kPlayStatusPlay);
                                 self.update_state_position(position_ms);
                                 self.play_status = SpircPlayStatus::Playing {
                                     nominal_start_time: new_nominal_start_time,
@@ -618,7 +625,6 @@ impl SpircTask {
                         trace!("==> kPlayStatusPause");
                         match self.play_status {
                             SpircPlayStatus::Paused { .. } | SpircPlayStatus::Playing { .. } => {
-                                self.state.set_status(PlayStatus::kPlayStatusPause);
                                 self.update_state_position(new_position_ms);
                                 self.play_status = SpircPlayStatus::Paused {
                                     position_ms: new_position_ms,
@@ -628,7 +634,6 @@ impl SpircTask {
                             }
                             SpircPlayStatus::LoadingPlay { .. }
                             | SpircPlayStatus::LoadingPause { .. } => {
-                                self.state.set_status(PlayStatus::kPlayStatusPause);
                                 self.update_state_position(new_position_ms);
                                 self.play_status = SpircPlayStatus::Paused {
                                     position_ms: new_position_ms,
@@ -644,7 +649,6 @@ impl SpircTask {
                         match self.play_status {
                             SpircPlayStatus::Stopped => Ok(()),
                             _ => {
-                                self.state.set_status(PlayStatus::kPlayStatusStop);
                                 self.play_status = SpircPlayStatus::Stopped;
                                 self.notify().await
                             }
@@ -798,7 +802,9 @@ impl SpircTask {
             }
             RequestEndpoint::Unknown(endpoint) => {
                 warn!("unhandled command! endpoint '{endpoint}'");
-                Reply::Unanswered
+
+                // todo: should be Reply::Unanswered
+                Reply::Success
             }
         };
 
@@ -899,12 +905,15 @@ impl SpircTask {
         Ok(())
     }
 
-    fn handle_disconnect(&mut self) {
+    async fn handle_disconnect(&mut self) -> Result<(), Error> {
         self.connect_state.set_active(false);
+        self.notify().await?;
         self.handle_stop();
 
         self.player
             .emit_session_disconnected_event(self.session.connection_id(), self.session.username());
+
+        Ok(())
     }
 
     fn handle_stop(&mut self) {
@@ -931,9 +940,10 @@ impl SpircTask {
         self.player
             .emit_filter_explicit_content_changed_event(self.session.filter_explicit_content());
 
-        self.player.emit_shuffle_changed_event(self.state.shuffle());
+        let options = &self.connect_state.player.options;
+        self.player.emit_shuffle_changed_event(options.shuffling_context);
 
-        self.player.emit_repeat_changed_event(self.state.repeat());
+        self.player.emit_repeat_changed_event(options.repeating_track, options.repeating_context);
     }
 
     async fn handle_load(&mut self, state: &State) -> Result<(), Error> {
@@ -951,9 +961,8 @@ impl SpircTask {
 
         self.update_tracks(state);
 
-        if !self.state.track.is_empty() {
-            let start_playing = state.status() == PlayStatus::kPlayStatusPlay;
-            self.load_track(start_playing, state.position_ms())?;
+        if !self.connect_state.player.next_tracks.is_empty() {
+            self.load_track(self.connect_state.player.is_playing, state.position_ms())?;
         } else {
             info!("No more tracks left in queue");
             self.handle_stop();
@@ -968,7 +977,6 @@ impl SpircTask {
                 preloading_of_next_track_triggered,
             } => {
                 self.player.play();
-                self.state.set_status(PlayStatus::kPlayStatusPlay);
                 self.update_state_position(position_ms);
                 self.play_status = SpircPlayStatus::Playing {
                     nominal_start_time: self.now_ms() - position_ms as i64,
@@ -1007,7 +1015,6 @@ impl SpircTask {
                 preloading_of_next_track_triggered,
             } => {
                 self.player.pause();
-                self.state.set_status(PlayStatus::kPlayStatusPause);
                 let position_ms = (self.now_ms() - nominal_start_time) as u32;
                 self.update_state_position(position_ms);
                 self.play_status = SpircPlayStatus::Paused {
@@ -1046,12 +1053,13 @@ impl SpircTask {
         };
     }
 
+    // todo: remove later
     fn consume_queued_track(&mut self) -> usize {
         // Removes current track if it is queued
         // Returns the index of the next track
-        let current_index = self.state.playing_track_index() as usize;
-        if (current_index < self.state.track.len()) && self.state.track[current_index].queued() {
-            self.state.track.remove(current_index);
+        let current_index = self.connect_state.player.index.track as usize;
+        if self.connect_state.player.track.provider == "queue" {
+            self.connect_state.queue.tracks.remove(current_index);
             current_index
         } else {
             current_index + 1
@@ -1104,13 +1112,26 @@ impl SpircTask {
     }
 
     fn handle_next(&mut self) -> Result<(), Error> {
-        let context_uri = self.state.context_uri().to_owned();
-        let mut tracks_len = self.state.track.len() as u32;
-        let mut new_index = self.consume_queued_track() as u32;
-        let mut continue_playing = self.state.status() == PlayStatus::kPlayStatusPlay;
+        let context_uri = self.connect_state.player.context_uri.to_owned();
+        let mut tracks_len = self.connect_state.player.next_tracks.len() as u32;
+        let mut continue_playing = self.connect_state.player.is_playing;
 
-        let update_tracks =
-            self.autoplay_context && tracks_len - new_index < CONTEXT_FETCH_THRESHOLD;
+        let next_track = if self.connect_state.queue.is_playing_queue {
+            match self.connect_state.queue.tracks.pop() {
+                Some(track) => Some(ProvidedTrack {
+                    uri: track.uri.to_string(),
+                    uid: track.uid.to_string(),
+                    provider: "queue".to_string(),
+                    ..Default::default()
+                }),
+                None => self.connect_state.player.next_tracks.pop(),
+            }
+        } else {
+            self.connect_state.player.next_tracks.pop()
+        };
+
+        let mut new_index = 0;
+        let update_tracks = self.autoplay_context && tracks_len - new_index < CONTEXT_FETCH_THRESHOLD;
 
         debug!(
             "At track {:?} of {:?} <{:?}> update [{}]",
@@ -1143,17 +1164,17 @@ impl SpircTask {
                 self.player.set_auto_normalise_as_album(false);
             } else {
                 new_index = 0;
-                continue_playing &= self.state.repeat();
-                debug!("Looping back to start, repeat is {}", continue_playing);
+                continue_playing &= self.connect_state.player.options.repeating_context;
+                debug!("Looping back to start, repeating_context is {}", continue_playing);
             }
         }
 
         if tracks_len > 0 {
-            self.state.set_playing_track_index(new_index);
+            self.connect_state.set_playing_track_index(new_index);
             self.load_track(continue_playing, 0)
         } else {
             info!("Not playing next track because there are no more tracks left in queue.");
-            self.state.set_playing_track_index(0);
+            self.connect_state.set_playing_track_index(0);
             self.handle_stop();
             Ok(())
         }
@@ -1243,6 +1264,9 @@ impl SpircTask {
 
             let new_tracks = new_tracks
                 .iter()
+                // todo: context_index
+                // .skip(context_index)
+                .take(80)
                 .map(|track| ProvidedTrack {
                     uri: track.uri.clone(),
                     uid: track.uid.clone(),
@@ -1341,13 +1365,13 @@ impl SpircTask {
     }
 
     async fn notify(&mut self) -> Result<(), Error> {
-        let status = self.state.status();
+        self.connect_state.set_status(&self.play_status);
 
         // When in loading state, the Spotify UI is disabled for interaction.
         // On desktop this isn't so bad but on mobile it means that the bottom
         // control disappears entirely. This is very confusing, so don't notify
         // in this case.
-        if status == PlayStatus::kPlayStatusLoading {
+        if self.connect_state.player.is_playing {
             return Ok(());
         }
 

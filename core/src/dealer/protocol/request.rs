@@ -19,7 +19,7 @@ pub struct RequestCommand {
     #[serde(default, deserialize_with = "deserialize_base64_proto")]
     pub data: Option<TransferState>,
     pub options: Option<Options>,
-    pub from_device_identifier: String,
+    pub from_device_identifier: Option<String>,
     pub logging_params: LoggingParams,
 }
 
@@ -27,21 +27,25 @@ pub struct RequestCommand {
 #[serde(rename_all = "snake_case")]
 pub enum RequestEndpoint {
     Transfer,
+    // Play,
+    // Pause,
+    // SkipNext,
+    // SkipPrev,
     #[serde(untagged)]
     Unknown(String),
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Options {
-    pub restore_paused: String,
-    pub restore_position: String,
-    pub restore_track: String,
-    pub retain_session: String,
+    pub restore_paused: Option<String>,
+    pub restore_position: Option<String>,
+    pub restore_track: Option<String>,
+    pub retain_session: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct LoggingParams {
-    interaction_ids: Vec<String>,
+    interaction_ids: Option<Vec<String>>,
     device_identifier: Option<String>,
     command_initiated_time: Option<i64>,
     page_instance_ids: Option<Vec<String>>,

@@ -2,14 +2,34 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::spirc::SpircPlayStatus;
 use librespot_core::config::DeviceType;
+use librespot_core::dealer::protocol::Request;
 use librespot_core::spclient::SpClientResult;
-use librespot_core::{version, Session};
+use librespot_core::{version, Error, Session};
 use librespot_protocol::connect::{
     Capabilities, Device, DeviceInfo, MemberType, PutStateReason, PutStateRequest,
 };
-use librespot_protocol::player::{ContextPlayerOptions, PlayOrigin, PlayerState, Suppressions};
+use librespot_protocol::player::{
+    ContextPlayerOptions, PlayOrigin, PlayerState, ProvidedTrack, Queue, Suppressions,
+};
 use protobuf::{EnumOrUnknown, MessageField};
-use librespot_core::dealer::protocol::Request;
+use thiserror::Error;
+
+// todo: finish error
+#[derive(Debug, Error)]
+pub enum ConnectStateError {
+    #[error("current")]
+    NoCurrentTrack,
+    #[error("next")]
+    NoNextTrack,
+    #[error("prev")]
+    NoPreviousTrack,
+}
+
+impl From<ConnectStateError> for Error {
+    fn from(err: ConnectStateError) -> Self {
+        Error::failed_precondition(err)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConnectStateConfig {
@@ -44,7 +64,12 @@ pub struct ConnectState {
     pub has_been_playing_for: Option<Instant>,
 
     pub device: DeviceInfo,
+
+    // prev_track => we can pop easily, the last played track is at the end of the list
+    // next_track => we have to pop the first track, so find a way lol
     pub player: PlayerState,
+
+    pub queue: Queue,
 
     pub last_command: Option<Request>,
 }
@@ -128,6 +153,24 @@ impl ConnectState {
         }
     }
 
+    pub fn set_repeat_context(&mut self, repeat: bool) {
+        if let Some(options) = self.player.options.as_mut() {
+            options.repeating_context = repeat;
+        }
+    }
+
+    pub fn set_repeat_track(&mut self, repeat: bool) {
+        if let Some(options) = self.player.options.as_mut() {
+            options.repeating_track = repeat;
+        }
+    }
+
+    pub fn set_shuffle(&mut self, shuffle: bool) {
+        if let Some(options) = self.player.options.as_mut() {
+            options.shuffling_context = shuffle;
+        }
+    }
+
     pub fn set_playing_track_index(&mut self, new_index: u32) {
         if let Some(index) = self.player.index.as_mut() {
             index.track = new_index;
@@ -149,6 +192,59 @@ impl ConnectState {
             status,
             SpircPlayStatus::LoadingPlay { .. } | SpircPlayStatus::Playing { .. }
         );
+
+        debug!(
+            "updated connect play status playing: {}, paused: {}, buffering: {}",
+            self.player.is_playing, self.player.is_paused, self.player.is_buffering
+        )
+    }
+
+    pub fn next_playing_track(&mut self) -> Result<&MessageField<ProvidedTrack>, Error> {
+        if self.queue.is_playing_queue {
+            self.next_queued_track()
+        } else {
+            self.next_track()
+        }
+    }
+
+    fn next_queued_track(&mut self) -> Result<&MessageField<ProvidedTrack>, Error> {
+        let next_queued_track = match self.queue.tracks.pop() {
+            None => return self.next_track(),
+            Some(next_queued) => next_queued,
+        };
+
+        let next_provided_track = ProvidedTrack {
+            uri: next_queued_track.uri.to_string(),
+            uid: next_queued_track.uid.to_string(),
+            provider: "queue".to_string(),
+            ..Default::default()
+        };
+
+        self.player.track = MessageField::some(next_provided_track);
+        Ok(&self.player.track)
+    }
+
+    fn prev_track(&mut self) -> Option<ProvidedTrack> {
+        None
+    }
+
+    fn next_track(&mut self) -> Result<&MessageField<ProvidedTrack>, Error> {
+        let player = &mut self.player;
+
+        let old_track = player
+            .track
+            .take()
+            .ok_or(ConnectStateError::NoCurrentTrack)?;
+
+        if player.prev_tracks.len() >= 10 {
+            player.prev_tracks.remove(0);
+        }
+        player.prev_tracks.push(old_track);
+
+        let new_track = player.next_tracks.remove(0);
+        player.track = MessageField::some(new_track);
+
+        Ok(&player.track)
     }
 
     pub async fn update_state(&self, session: &Session, reason: PutStateReason) -> SpClientResult {
