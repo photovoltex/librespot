@@ -14,6 +14,7 @@ fn cleanup() {
 
 fn compile() {
     let proto_dir = Path::new(&env::var("CARGO_MANIFEST_DIR").expect("env")).join("proto");
+    let custom_proto_dir = proto_dir.join("_custom");
 
     let files = &[
         proto_dir.join("connect.proto"),
@@ -39,6 +40,7 @@ fn compile() {
         proto_dir.join("user_attributes.proto"),
         proto_dir.join("autoplay_context_request.proto"),
         proto_dir.join("social_connect_v2.proto"),
+        custom_proto_dir.join("presence2.proto"),
         // TODO: remove these legacy protobufs when we are on the new API completely
         proto_dir.join("authentication.proto"),
         proto_dir.join("canvaz.proto"),

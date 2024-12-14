@@ -107,6 +107,8 @@ struct SpircTask {
     /// is set when transferring, and used after resolving the contexts to finish the transfer
     pub transfer_state: Option<TransferState>,
 
+    track_changed: bool,
+
     /// when set to true, it will update the volume after [VOLUME_UPDATE_DELAY],
     /// when no other future resolves, otherwise resets the delay
     update_volume: bool,
@@ -249,6 +251,7 @@ impl Spirc {
             resolve_context: Vec::new(),
             unavailable_contexts: HashMap::new(),
             transfer_state: None,
+            track_changed: false,
             update_volume: false,
 
             spirc_id,
@@ -410,7 +413,7 @@ impl SpircTask {
                 },
                 cmd = async { commands?.recv().await }, if commands.is_some() => if let Some(cmd) = cmd {
                     if let Err(e) = self.handle_command(cmd).await {
-                        debug!("could not dispatch command: {}", e);
+                        debug!("failed handling command: {}", e);
                     }
                 },
                 event = async { player_events?.recv().await }, if player_events.is_some() => if let Some(event) = event {
@@ -418,6 +421,12 @@ impl SpircTask {
                         error!("could not dispatch player event: {}", e);
                     }
                 },
+                _ = async {}, if self.track_changed => {
+                    self.track_changed = false;
+                    if let Err(why) = self.handle_track_changed().await {
+                        error!("updating presence failed: {why}")
+                    }
+                }
                 _ = async { sleep(RESOLVE_CONTEXT_DELAY).await }, if !self.resolve_context.is_empty() => {
                     if let Err(why) = self.handle_resolve_context().await {
                         error!("ContextError: {why}")
@@ -698,6 +707,7 @@ impl SpircTask {
 
     async fn handle_player_event(&mut self, event: PlayerEvent) -> Result<(), Error> {
         if let PlayerEvent::TrackChanged { audio_item } = event {
+            self.track_changed = true;
             self.connect_state.update_duration(audio_item.duration_ms);
             return Ok(());
         }
@@ -1430,6 +1440,21 @@ impl SpircTask {
             self.play_status,
             SpircPlayStatus::Playing { .. } | SpircPlayStatus::LoadingPlay { .. }
         )
+    }
+
+    async fn handle_track_changed(&mut self) -> Result<(), Error> {
+        self.session
+            .spclient()
+            .put_presence(
+                self.connect_state.current_track(|t| t.uri.to_string()),
+                self.connect_state.context_uri().clone(),
+                self.connect_state
+                    .player()
+                    .play_origin
+                    .referrer_identifier
+                    .clone(),
+            )
+            .await
     }
 
     fn handle_next(&mut self, track_uri: Option<String>) -> Result<(), Error> {

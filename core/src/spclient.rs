@@ -17,6 +17,8 @@ use crate::{
         },
         connect::PutStateRequest,
         extended_metadata::BatchedEntityRequest,
+        presence2::{PresenceItem, PresenceUpdateRequest},
+        {autoplay_context_request::AutoplayContextRequest, player::Context},
     },
     token::Token,
     util,
@@ -32,7 +34,6 @@ use hyper::{
     HeaderMap, Method, Request,
 };
 use hyper_util::client::legacy::ResponseFuture;
-use librespot_protocol::{autoplay_context_request::AutoplayContextRequest, player::Context};
 use protobuf::{Enum, Message, MessageFull};
 use rand::RngCore;
 use sysinfo::System;
@@ -64,6 +65,8 @@ pub enum SpClientError {
     Attribute(String),
     #[error("expected data but received none")]
     NoData,
+    #[error("the request did not finish successful")]
+    RequestDidNotFinishSuccessful,
 }
 
 impl From<SpClientError> for Error {
@@ -717,6 +720,7 @@ impl SpClient {
     // - /presence-view/v1/buddylist
 
     // TODO: Find endpoint for newer canvas.proto and upgrade to that.
+    //  => this might be possible via the extended-metadata endpoint
     pub async fn get_canvases(&self, request: EntityCanvazRequest) -> SpClientResult {
         let endpoint = "/canvaz-cache/v0/canvases";
         self.request_with_protobuf(&Method::POST, endpoint, None, &request)
@@ -879,5 +883,48 @@ impl SpClient {
         let endpoint = format!("/playlist/v2/user/{user}/rootlist?decorate=revision,attributes,length,owner,capabilities,status_code&from={from}&length={length}");
 
         self.request(&Method::GET, &endpoint, None, None).await
+    }
+
+    /// Updates the presence of the current user.
+    ///
+    /// This updates the played track of friends and has nothing
+    /// to do with recently played tracks.
+    ///
+    /// ## Remarks:
+    /// - Requires a connected session (see [Session::connect](crate::Session::connect))
+    pub async fn put_presence(
+        &self,
+        track_uri: String,
+        context_uri: String,
+        origin_referrer_identifier: String,
+    ) -> Result<(), Error> {
+        let endpoint = format!("/presence2/publish/user/{}", self.session().username());
+
+        // didn't find a matching protobuf definition so far :/
+        let request = PresenceUpdateRequest {
+            items: vec![PresenceItem {
+                track_uri,
+                context_uri,
+                origin_referrer_identifier,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let res = self
+            .request_with_protobuf_and_options(
+                &Method::PUT,
+                &endpoint,
+                None,
+                &request,
+                &NO_METRICS_AND_SALT,
+            )
+            .await?;
+
+        let response = String::from_utf8_lossy(&res);
+        (response == "true").then_some(()).ok_or_else(|| {
+            error!("{response}");
+            SpClientError::RequestDidNotFinishSuccessful.into()
+        })
     }
 }

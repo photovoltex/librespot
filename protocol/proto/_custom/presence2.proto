@@ -1,0 +1,19 @@
+// custom protobuf, build from scratch
+
+syntax = "proto3";
+
+option optimize_for = CODE_SIZE;
+
+message PresenceUpdateRequest {
+  // could be something else then repeated
+  repeated PresenceItem items = 6;
+}
+
+message PresenceItem {
+  string track_uri = 1;
+  string context_uri = 2;
+  // probably
+  string origin_referrer_identifier = 4;
+  // unknown but usually send with value 0
+  reserved 5;
+}
