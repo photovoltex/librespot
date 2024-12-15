@@ -51,3 +51,10 @@ pub fn spotify_semantic_version() -> String {
         _ => SPOTIFY_SEMANTIC_VERSION.to_string(),
     }
 }
+
+pub fn spotify_property_set_id() -> String {
+    match crate::config::OS {
+        "android" | "ios" => SPOTIFY_MOBILE_PROPERTY_SET_ID.to_owned(),
+        _ => SPOTIFY_PROPERTY_SET_ID.to_string(),
+    }
+}

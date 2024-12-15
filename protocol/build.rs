@@ -55,6 +55,10 @@ fn compile() {
         proto_dir.join("play_origin.proto"),
         proto_dir.join("suppressions.proto"),
         proto_dir.join("instrumentation_params.proto"),
+        proto_dir.join("ucs.proto"),
+        proto_dir.join("useraccount.proto"),
+        proto_dir.join("resolve.proto"),
+        proto_dir.join("property_definition.proto"),
         // TODO: remove these legacy protobufs when we are on the new API completely
         proto_dir.join("authentication.proto"),
         proto_dir.join("canvaz.proto"),

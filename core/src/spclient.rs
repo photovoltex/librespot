@@ -1,3 +1,5 @@
+mod proto_requests;
+
 use std::{
     fmt::Write,
     time::{Duration, Instant},
@@ -18,6 +20,7 @@ use crate::{
         connect::PutStateRequest,
         context::Context,
         extended_metadata::BatchedEntityRequest,
+        ucs::UcsResponseWrapper,
     },
     token::Token,
     util,
@@ -35,6 +38,7 @@ use hyper::{
 use hyper_util::client::legacy::ResponseFuture;
 use protobuf::{Enum, Message, MessageFull};
 use rand::RngCore;
+use serde_json::Value;
 use sysinfo::System;
 use thiserror::Error;
 
@@ -64,6 +68,8 @@ pub enum SpClientError {
     Attribute(String),
     #[error("expected data but received none")]
     NoData,
+    #[error("request was invalid: {0:#?}")]
+    InvalidRequest(Value),
 }
 
 impl From<SpClientError> for Error {
@@ -872,5 +878,27 @@ impl SpClient {
         let endpoint = format!("/playlist/v2/user/{user}/rootlist?decorate=revision,attributes,length,owner,capabilities,status_code&from={from}&length={length}");
 
         self.request(&Method::GET, &endpoint, None, None).await
+    }
+
+    pub async fn ucs(&self) -> Result<UcsResponseWrapper, Error> {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, "application/x-protobuf".parse()?);
+
+        let response = self
+            .request_with_protobuf(
+                &Method::POST,
+                "/user-customization-service/v1/customize",
+                Some(headers),
+                &proto_requests::ucs_request(),
+            )
+            .await?;
+
+        match UcsResponseWrapper::parse_from_bytes(&response) {
+            Ok(res) => Ok(res),
+            Err(_) => {
+                let error = serde_json::from_slice::<Value>(&response)?;
+                Err(SpClientError::InvalidRequest(error))?
+            }
+        }
     }
 }
