@@ -51,7 +51,7 @@ impl From<SpotifyItemType> for &str {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SpotifyId {
     pub id: u128,
     pub item_type: SpotifyItemType,

@@ -78,7 +78,7 @@ impl AudioKeyManager {
         Ok(())
     }
 
-    pub async fn request(&self, track: SpotifyId, file: FileId) -> Result<AudioKey, Error> {
+    pub async fn request(&self, track: &SpotifyId, file: &FileId) -> Result<AudioKey, Error> {
         let (tx, rx) = oneshot::channel();
 
         let seq = self.lock(move |inner| {
@@ -98,7 +98,7 @@ impl AudioKeyManager {
         }
     }
 
-    fn send_key_request(&self, seq: u32, track: SpotifyId, file: FileId) -> Result<(), Error> {
+    fn send_key_request(&self, seq: u32, track: &SpotifyId, file: &FileId) -> Result<(), Error> {
         let mut data: Vec<u8> = Vec::new();
         data.write_all(&file.0)?;
         data.write_all(&track.to_raw())?;

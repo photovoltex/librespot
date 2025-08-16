@@ -834,7 +834,7 @@ impl PlayerTrackLoader {
             let key = match self
                 .session
                 .audio_key()
-                .request(audio_item.track_id, file_id)
+                .request(&audio_item.track_id, &file_id)
                 .await
             {
                 Ok(key) => Some(key),
@@ -1062,7 +1062,7 @@ impl PlayerInternal {
         match self.state.take() {
             Some(PlayerState::Paused(paused)) => {
                 self.send_event(PlayerEvent::Playing {
-                    track_id: paused.track_id,
+                    track_id: paused.track_id.clone(),
                     play_request_id: paused.play_request_id,
                     position_ms: paused.stream_position_ms,
                 });
@@ -1086,7 +1086,7 @@ impl PlayerInternal {
             Some(PlayerState::Playing(playing)) => {
                 self.ensure_sink_stopped(false);
                 self.send_event(PlayerEvent::Paused {
-                    track_id: playing.track_id,
+                    track_id: playing.track_id.clone(),
                     play_request_id: playing.play_request_id,
                     position_ms: playing.stream_position_ms,
                 });
@@ -1219,7 +1219,7 @@ impl PlayerInternal {
                 Some(PlayerState::Playing(playing)) => {
                     self.send_event(PlayerEvent::EndOfTrack {
                         play_request_id: playing.play_request_id,
-                        track_id: playing.track_id,
+                        track_id: playing.track_id.clone(),
                     });
                     self.state = Some(PlayerState::EndOfTrack(playing.into()))
                 }
@@ -1258,7 +1258,7 @@ impl PlayerInternal {
         if start_playback {
             self.ensure_sink_running();
             self.send_event(PlayerEvent::Playing {
-                track_id,
+                track_id: track_id.clone(),
                 play_request_id,
                 position_ms,
             });
@@ -1282,7 +1282,7 @@ impl PlayerInternal {
         } else {
             self.ensure_sink_stopped(false);
             self.send_event(PlayerEvent::Paused {
-                track_id,
+                track_id: track_id.clone(),
                 play_request_id,
                 position_ms,
             });
@@ -1431,11 +1431,11 @@ impl PlayerInternal {
                 loader,
             }) if (track_id == loaded_track_id) && (position_ms == 0) => loader,
             // If we don't have a loader yet, create one from scratch.
-            _ => Box::pin(self.load_track(track_id, position_ms)),
+            _ => Box::pin(self.load_track(track_id.clone(), position_ms)),
         };
 
         self.send_event(PlayerEvent::Loading {
-            track_id,
+            track_id: track_id.clone(),
             play_request_id,
             position_ms,
         });
@@ -1494,7 +1494,7 @@ impl PlayerInternal {
 
         // schedule the preload of the current track if desired.
         if preload_track {
-            let loader = self.load_track(track_id, 0);
+            let loader = self.load_track(track_id.clone(), 0);
             self.preload = Some(PlayerPreload::Loading {
                 track_id,
                 loader: Box::pin(loader),
@@ -1515,7 +1515,7 @@ impl PlayerInternal {
         })) = &self.state
         {
             return self.handle_command_load(
-                *track_id,
+                track_id.clone(),
                 Some(*play_request_id),
                 *start_playback,
                 position_ms,
@@ -1547,7 +1547,7 @@ impl PlayerInternal {
 
                     Some(PlayerEvent::Seeked {
                         play_request_id: *play_request_id,
-                        track_id: *track_id,
+                        track_id: track_id.clone(),
                         position_ms: new_position_ms,
                     })
                 }
@@ -1668,7 +1668,7 @@ impl PlayerInternal {
                             );
                             self.send_event(PlayerEvent::EndOfTrack {
                                 play_request_id: *play_request_id,
-                                track_id: *track_id,
+                                track_id: track_id.clone(),
                             })
                         }
                     }

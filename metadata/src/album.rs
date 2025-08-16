@@ -78,7 +78,7 @@ impl Metadata for Album {
         session.spclient().get_album_metadata(album_id).await
     }
 
-    fn parse(msg: &Self::Message, _: &SpotifyId) -> Result<Self, Error> {
+    fn parse(msg: &Self::Message, _: SpotifyId) -> Result<Self, Error> {
         Self::try_from(msg)
     }
 }

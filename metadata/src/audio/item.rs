@@ -67,7 +67,7 @@ impl AudioItem {
 
         match id.item_type {
             SpotifyItemType::Track => {
-                let track = Track::get(session, &id).await?;
+                let track = Track::get(session, id).await?;
 
                 if track.duration <= 0 {
                     return Err(Error::unavailable(MetadataError::InvalidDuration(
@@ -137,7 +137,7 @@ impl AudioItem {
                 })
             }
             SpotifyItemType::Episode => {
-                let episode = Episode::get(session, &id).await?;
+                let episode = Episode::get(session, id).await?;
 
                 if episode.duration <= 0 {
                     return Err(Error::unavailable(MetadataError::InvalidDuration(

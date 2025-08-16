@@ -118,7 +118,7 @@ impl PlayerTask {
 
         match preload_result {
             Some(loaded_track) => {
-                self.send_event(PlayerEvent::Preloading { track_id });
+                self.send_event(PlayerEvent::Preloading { track_id: track_id.clone() });
                 self.preload = Some(PlayerPreload::Ready {
                     track_id,
                     loaded_track: Box::new(loaded_track),
@@ -227,7 +227,7 @@ impl PlayerTask {
                     state.reported_nominal_start_time = now.checked_sub(new_stream_position);
                     self.send_event(PlayerEvent::PositionCorrection {
                         play_request_id: state.play_request_id,
-                        track_id: state.track_id,
+                        track_id: state.track_id.clone(),
                         position_ms: new_stream_position_ms,
                     });
                 }
@@ -240,7 +240,7 @@ impl PlayerTask {
                         self.last_progress_update = now;
                         self.send_event(PlayerEvent::PositionChanged {
                             play_request_id: state.play_request_id,
-                            track_id: state.track_id,
+                            track_id: state.track_id.clone(),
                             position_ms: new_stream_position_ms,
                         });
                     }
@@ -295,7 +295,7 @@ impl PlayerTask {
             })) => {
                 *suggested_to_preload_next_track = true;
                 Some(PlayerEvent::TimeToPreloadNextTrack {
-                    track_id: *track_id,
+                    track_id: track_id.clone(),
                     play_request_id: *play_request_id,
                 })
             }

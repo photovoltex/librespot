@@ -773,7 +773,7 @@ impl SpircTask {
                 return Ok(());
             }
             PlayerEvent::Unavailable { track_id, .. } => {
-                self.handle_unavailable(track_id)?;
+                self.handle_unavailable(&track_id)?;
                 if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri()? {
                     self.handle_next(None)?
                 }
@@ -1500,7 +1500,7 @@ impl SpircTask {
     }
 
     // Mark unavailable tracks so we can skip them later
-    fn handle_unavailable(&mut self, track_id: SpotifyId) -> Result<(), Error> {
+    fn handle_unavailable(&mut self, track_id: &SpotifyId) -> Result<(), Error> {
         self.connect_state.mark_unavailable(track_id)?;
         self.handle_preload_next_track();
 
