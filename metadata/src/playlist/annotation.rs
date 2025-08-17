@@ -31,7 +31,7 @@ impl Metadata for PlaylistAnnotation {
         Self::request_for_user(session, &current_user, playlist_id).await
     }
 
-    fn parse(msg: &Self::Message, _: SpotifyId) -> Result<Self, Error> {
+    fn parse(msg: &Self::Message, _: &SpotifyId) -> Result<Self, Error> {
         Ok(Self {
             description: msg.description().to_owned(),
             picture: msg.picture().to_owned(), // TODO: is this a URL or Spotify URI?
@@ -60,7 +60,7 @@ impl PlaylistAnnotation {
     async fn get_for_user(
         session: &Session,
         username: &str,
-        playlist_id: SpotifyId,
+        playlist_id: &SpotifyId,
     ) -> Result<Self, Error> {
         let response = Self::request_for_user(session, username, &playlist_id).await?;
         let msg = <Self as Metadata>::Message::parse_from_bytes(&response)?;

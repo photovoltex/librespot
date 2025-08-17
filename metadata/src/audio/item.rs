@@ -60,7 +60,7 @@ pub enum UniqueFields {
 }
 
 impl AudioItem {
-    pub async fn get_file(session: &Session, id: SpotifyId) -> AudioItemResult {
+    pub async fn get_file(session: &Session, id: &SpotifyId) -> AudioItemResult {
         let image_url = session
             .get_user_attribute("image-url")
             .unwrap_or_else(|| String::from("https://i.scdn.co/image/{file_id}"));

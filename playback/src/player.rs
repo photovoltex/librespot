@@ -1,3 +1,8 @@
+use futures_util::{
+    StreamExt, TryFutureExt, future, future::FusedFuture,
+    stream::futures_unordered::FuturesUnordered,
+};
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     fmt,
@@ -11,12 +16,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-use futures_util::{
-    StreamExt, TryFutureExt, future, future::FusedFuture,
-    stream::futures_unordered::FuturesUnordered,
-};
-use parking_lot::Mutex;
 use symphonia::core::io::MediaSource;
 use tokio::sync::{mpsc, oneshot};
 
@@ -690,16 +689,16 @@ struct PlayerTrackLoader {
 }
 
 impl PlayerTrackLoader {
-    async fn find_available_alternative(&self, mut audio_item: AudioItem) -> Option<AudioItem> {
+    async fn find_available_alternative(&self, audio_item: AudioItem) -> Option<AudioItem> {
         if let Err(e) = audio_item.availability {
             error!("Track is unavailable: {e}");
             None
         } else if !audio_item.files.is_empty() {
             Some(audio_item)
-        } else if let Some(alternatives) = audio_item.alternatives.take() {
+        } else if let Some(alternatives) = audio_item.alternatives.as_ref() {
             let alternatives: FuturesUnordered<_> = alternatives
                 .0
-                .into_iter()
+                .iter()
                 .map(|alt_id| AudioItem::get_file(&self.session, alt_id))
                 .collect();
 
@@ -745,10 +744,10 @@ impl PlayerTrackLoader {
 
     async fn load_track(
         &self,
-        spotify_id: SpotifyId,
+        audio_item: Result<AudioItem, Error>,
         position_ms: u32,
     ) -> Option<PlayerLoadedTrackData> {
-        let audio_item = match AudioItem::get_file(&self.session, spotify_id).await {
+        let audio_item = match audio_item {
             Ok(audio) => self.find_available_alternative(audio).await?,
             Err(e) => {
                 error!("Unable to load audio item: {e:?}");
@@ -1304,7 +1303,7 @@ impl PlayerInternal {
         }
     }
 
-    fn handle_command_load(
+    async fn handle_command_load(
         &mut self,
         track_id: SpotifyId,
         play_request_id_option: Option<u64>,
@@ -1431,7 +1430,7 @@ impl PlayerInternal {
                 loader,
             }) if (track_id == loaded_track_id) && (position_ms == 0) => loader,
             // If we don't have a loader yet, create one from scratch.
-            _ => Box::pin(self.load_track(track_id.clone(), position_ms)),
+            _ => Box::pin(self.load_track(&track_id, position_ms).await),
         };
 
         self.send_event(PlayerEvent::Loading {
@@ -1451,7 +1450,7 @@ impl PlayerInternal {
         Ok(())
     }
 
-    fn handle_command_preload(&mut self, track_id: SpotifyId) {
+    async fn handle_command_preload(&mut self, track_id: SpotifyId) {
         debug!("Preloading track");
         let mut preload_track = true;
         // check whether the track is already loaded somewhere or being loaded.
@@ -1494,7 +1493,7 @@ impl PlayerInternal {
 
         // schedule the preload of the current track if desired.
         if preload_track {
-            let loader = self.load_track(track_id.clone(), 0);
+            let loader = self.load_track(&track_id, 0).await;
             self.preload = Some(PlayerPreload::Loading {
                 track_id,
                 loader: Box::pin(loader),
@@ -1502,7 +1501,7 @@ impl PlayerInternal {
         }
     }
 
-    fn handle_command_seek(&mut self, position_ms: u32) -> PlayerResult {
+    async fn handle_command_seek(&mut self, position_ms: u32) -> PlayerResult {
         // When we are still loading, the user may immediately ask to
         // seek to another position yet the decoder won't be ready for
         // that. In this case just restart the loading process but
@@ -1514,12 +1513,14 @@ impl PlayerInternal {
             ..
         })) = &self.state
         {
-            return self.handle_command_load(
-                track_id.clone(),
-                Some(*play_request_id),
-                *start_playback,
-                position_ms,
-            );
+            return self
+                .handle_command_load(
+                    track_id.clone(),
+                    Some(*play_request_id),
+                    *start_playback,
+                    position_ms,
+                )
+                .await;
         }
 
         let event = if let Some(PlayerState::Playing(PlayingState {
@@ -1572,18 +1573,21 @@ impl PlayerInternal {
         Ok(())
     }
 
-    fn handle_command(&mut self, cmd: PlayerCommand) -> PlayerResult {
+    async fn handle_command(&mut self, cmd: PlayerCommand) -> PlayerResult {
         debug!("command={cmd:?}");
         match cmd {
             PlayerCommand::Load {
                 track_id,
                 play,
                 position_ms,
-            } => self.handle_command_load(track_id, None, play, position_ms)?,
+            } => {
+                self.handle_command_load(track_id, None, play, position_ms)
+                    .await?
+            }
 
-            PlayerCommand::Preload { track_id } => self.handle_command_preload(track_id),
+            PlayerCommand::Preload { track_id } => self.handle_command_preload(track_id).await,
 
-            PlayerCommand::Seek(position_ms) => self.handle_command_seek(position_ms)?,
+            PlayerCommand::Seek(position_ms) => self.handle_command_seek(position_ms).await?,
 
             PlayerCommand::Play => self.handle_play(),
 
@@ -1684,9 +1688,9 @@ impl PlayerInternal {
             .retain(|sender| sender.send(event.clone()).is_ok());
     }
 
-    fn load_track(
+    async fn load_track(
         &mut self,
-        spotify_id: SpotifyId,
+        spotify_id: &SpotifyId,
         position_ms: u32,
     ) -> impl FusedFuture<Output = Result<PlayerLoadedTrackData, ()>> + Send + 'static {
         // This method creates a future that returns the loaded stream and associated info.
@@ -1704,8 +1708,12 @@ impl PlayerInternal {
 
         let load_handles_clone = self.load_handles.clone();
         let handle = tokio::runtime::Handle::current();
+
+        // this has to be acquired outside the loader thread, so that the id doesn't need to be cloned for nothing
+        let audio_item = AudioItem::get_file(&self.session, spotify_id).await;
+
         let load_handle = thread::spawn(move || {
-            let data = handle.block_on(loader.load_track(spotify_id, position_ms));
+            let data = handle.block_on(loader.load_track(audio_item, position_ms));
             if let Some(data) = data {
                 let _ = result_tx.send(data);
             }

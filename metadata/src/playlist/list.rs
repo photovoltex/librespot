@@ -97,10 +97,10 @@ impl Metadata for Playlist {
         session.spclient().get_playlist(playlist_id).await
     }
 
-    fn parse(msg: &Self::Message, id: SpotifyId) -> Result<Self, Error> {
+    fn parse(msg: &Self::Message, id: &SpotifyId) -> Result<Self, Error> {
         // the playlist proto doesn't contain the id so we decorate it
         let playlist = SelectedListContent::try_from(msg)?;
-        let id = NamedSpotifyId::from_spotify_id(id, &playlist.owner_username);
+        let id = NamedSpotifyId::from_spotify_id(id.clone(), &playlist.owner_username);
 
         Ok(Self {
             id,

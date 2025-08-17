@@ -35,7 +35,7 @@ impl PlayerTask {
 
                     match cmd {
                         None => break,
-                        Some(cmd) => if let Err(e) = self.handle_command(cmd) {
+                        Some(cmd) => if let Err(e) = self.handle_command(cmd).await {
                             error!("Error handling command: {e}");
                         }
                     }
@@ -118,7 +118,9 @@ impl PlayerTask {
 
         match preload_result {
             Some(loaded_track) => {
-                self.send_event(PlayerEvent::Preloading { track_id: track_id.clone() });
+                self.send_event(PlayerEvent::Preloading {
+                    track_id: track_id.clone(),
+                });
                 self.preload = Some(PlayerPreload::Ready {
                     track_id,
                     loaded_track: Box::new(loaded_track),
