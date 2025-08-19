@@ -1978,10 +1978,8 @@ async fn main() {
     });
 
     if let Some(player_event_program) = setup.player_event_program.clone() {
-        _event_handler = Some(EventHandler::new(
-            player.get_player_event_channel(),
-            &player_event_program,
-        ));
+        let event_handler = EventHandler::new(&player_event_program);
+        player.add_player_event_listener(event_handler);
 
         if setup.emit_sink_events {
             player.set_sink_event_callback(Some(Box::new(move |sink_status| {

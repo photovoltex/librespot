@@ -10,6 +10,7 @@ use librespot_protocol as protocol;
 
 mod context_resolver;
 mod model;
+mod player_event_listener;
 mod shuffle_vec;
 mod spirc;
 mod state;

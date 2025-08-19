@@ -10,7 +10,6 @@ pub(super) struct PlayerTask(pub PlayerInternal);
 
 impl Deref for PlayerTask {
     type Target = PlayerInternal;
-
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -95,8 +94,8 @@ impl PlayerTask {
             }
             None => {
                 error!("Skipping to next track, unable to load track <{track_id:?}>");
-                self.send_event(PlayerEvent::Unavailable {
-                    track_id,
+                self.handle_event(PlayerEvent::Unavailable {
+                    track_id: &track_id,
                     play_request_id,
                 })
             }
@@ -118,8 +117,8 @@ impl PlayerTask {
 
         match preload_result {
             Some(loaded_track) => {
-                self.send_event(PlayerEvent::Preloading {
-                    track_id: track_id.clone(),
+                self.handle_event(PlayerEvent::Preloading {
+                    track_id: &track_id,
                 });
                 self.preload = Some(PlayerPreload::Ready {
                     track_id,
@@ -138,8 +137,8 @@ impl PlayerTask {
                     play_request_id, ..
                 })) = self.state
                 {
-                    self.send_event(PlayerEvent::Unavailable {
-                        track_id,
+                    self.handle_event(PlayerEvent::Unavailable {
+                        track_id: &track_id,
                         play_request_id,
                     });
                 }
@@ -165,9 +164,9 @@ impl PlayerTask {
                 error!(
                     "Skipping to next track, unable to get next packet for track <{track_id:?}>: {e:?}"
                 );
-                self.send_event(PlayerEvent::EndOfTrack {
+                self.handle_event(PlayerEvent::EndOfTrack {
                     play_request_id: state.play_request_id,
-                    track_id,
+                    track_id: &track_id,
                 });
                 self.state = Some(PlayerState::Stopped);
                 return;
@@ -187,9 +186,9 @@ impl PlayerTask {
                     error!(
                         "Skipping to next track, unable to decode samples for track <{track_id:?}>: {e:?}"
                     );
-                    self.send_event(PlayerEvent::EndOfTrack {
+                    self.handle_event(PlayerEvent::EndOfTrack {
                         play_request_id: state.play_request_id,
-                        track_id,
+                        track_id: &track_id,
                     });
                     self.state = Some(PlayerState::Stopped);
                     return;
@@ -227,9 +226,9 @@ impl PlayerTask {
 
                 if notify_about_position {
                     state.reported_nominal_start_time = now.checked_sub(new_stream_position);
-                    self.send_event(PlayerEvent::PositionCorrection {
+                    self.handle_event(PlayerEvent::PositionCorrection {
                         play_request_id: state.play_request_id,
-                        track_id: state.track_id.clone(),
+                        track_id: &state.track_id,
                         position_ms: new_stream_position_ms,
                     });
                 }
@@ -240,9 +239,9 @@ impl PlayerTask {
 
                     if last_progress_update_since_ms > interval {
                         self.last_progress_update = now;
-                        self.send_event(PlayerEvent::PositionChanged {
+                        self.handle_event(PlayerEvent::PositionChanged {
                             play_request_id: state.play_request_id,
-                            track_id: state.track_id.clone(),
+                            track_id: &state.track_id,
                             position_ms: new_stream_position_ms,
                         });
                     }
@@ -282,7 +281,7 @@ impl PlayerTask {
     }
 
     fn handle_preload_suggestion(&mut self) {
-        let event = match self.state.as_mut() {
+        match self.state.as_mut() {
             Some(PlayerState::Playing(PlayingState {
                 track_id,
                 play_request_id,
@@ -296,17 +295,15 @@ impl PlayerTask {
                 ..
             })) => {
                 *suggested_to_preload_next_track = true;
-                Some(PlayerEvent::TimeToPreloadNextTrack {
-                    track_id: track_id.clone(),
-                    play_request_id: *play_request_id,
-                })
-            }
-            _ => None,
-        };
 
-        // we can't send the event inside the match because we already have a mutable access
-        if let Some(evt) = event {
-            self.send_event(evt);
-        }
+                // we need to clone track_id, otherwise we have a mut ref to self and can't send the event
+                let event = PlayerEvent::TimeToPreloadNextTrack {
+                    track_id: &track_id.clone(),
+                    play_request_id: *play_request_id,
+                };
+                self.handle_event(event);
+            }
+            _ => {}
+        };
     }
 }

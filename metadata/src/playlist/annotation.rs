@@ -62,7 +62,7 @@ impl PlaylistAnnotation {
         username: &str,
         playlist_id: &SpotifyId,
     ) -> Result<Self, Error> {
-        let response = Self::request_for_user(session, username, &playlist_id).await?;
+        let response = Self::request_for_user(session, username, playlist_id).await?;
         let msg = <Self as Metadata>::Message::parse_from_bytes(&response)?;
         Self::parse(&msg, playlist_id)
     }
