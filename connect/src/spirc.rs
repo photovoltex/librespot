@@ -1,3 +1,4 @@
+use crate::player_event_forwarder::{SpircPlayerEvent, SpircPlayerEventForwarder};
 use crate::{
     LoadContextOptions, LoadRequestOptions, PlayContext,
     context_resolver::{ContextAction, ContextResolver, ResolveContext},
@@ -11,10 +12,7 @@ use crate::{
         session::UserAttributes,
     },
     model::{LoadRequest, PlayingTrack, SpircPlayStatus},
-    playback::{
-        mixer::Mixer,
-        player::{Player, PlayerEvent, PlayerEventChannel},
-    },
+    playback::{mixer::Mixer, player::Player},
     protocol::{
         connect::{Cluster, ClusterUpdate, LogoutCommand, SetVolumeCommand},
         context::Context,
@@ -74,7 +72,6 @@ struct SpircTask {
     /// the state management object
     connect_state: ConnectState,
 
-    play_request_id: Option<u64>,
     play_status: SpircPlayStatus,
 
     connection_id_update: BoxedStreamResult<String>,
@@ -88,7 +85,7 @@ struct SpircTask {
     user_attributes_mutation: BoxedStreamResult<UserAttributesMutation>,
 
     commands: Option<mpsc::UnboundedReceiver<SpircCommand>>,
-    player_events: Option<PlayerEventChannel>,
+    player_events: Option<mpsc::UnboundedReceiver<SpircPlayerEvent>>,
 
     context_resolver: ContextResolver,
 
@@ -218,7 +215,8 @@ impl Spirc {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
-        let player_events = player.get_player_event_channel();
+        let (handle, player_events) = SpircPlayerEventForwarder::new();
+        player.add_player_event_handler(handle);
 
         let mut task = SpircTask {
             player,
@@ -226,7 +224,6 @@ impl Spirc {
 
             connect_state,
 
-            play_request_id: None,
             play_status: SpircPlayStatus::Stopped,
 
             connection_id_update,
@@ -652,42 +649,53 @@ impl SpircTask {
         self.notify().await
     }
 
-    fn handle_player_event(&mut self, event: PlayerEvent) -> Result<(), Error> {
-        if let PlayerEvent::TrackChanged { audio_item } = event {
-            self.connect_state.update_duration(audio_item.duration_ms);
-            self.update_state = true;
-            return Ok(());
-        }
-
-        // update play_request_id
-        if let PlayerEvent::PlayRequestIdChanged { play_request_id } = event {
-            self.play_request_id = Some(play_request_id);
-            return Ok(());
-        }
-
-        let is_current_track = matches! {
-            (event.get_play_request_id(), self.play_request_id),
-            (Some(event_id), Some(current_id)) if event_id == current_id
-        };
-
-        // we only process events if the play_request_id matches. If it doesn't, it is
-        // an event that belongs to a previous track and only arrives now due to a race
-        // condition. In this case we have updated the state already and don't want to
-        // mess with it.
-        if !is_current_track {
-            return Ok(());
-        }
-
+    fn handle_player_event(&mut self, event: SpircPlayerEvent) -> Result<(), Error> {
         match event {
-            PlayerEvent::EndOfTrack { .. } => {
-                let next_track = self
-                    .connect_state
-                    .repeat_track()
-                    .then(|| self.connect_state.current_track(|t| t.uri.clone()));
-
-                self.handle_next(next_track)?
+            SpircPlayerEvent::UpdateDuration(dur) => self.connect_state.update_duration(dur),
+            SpircPlayerEvent::UpdatePosition {
+                position: Some(pos),
+                as_nominal: false,
+                ..
+            } => self.connect_state.update_position(pos, self.now_ms()),
+            SpircPlayerEvent::UpdatePosition {
+                position: Some(pos),
+                as_nominal: true,
+                is_playing,
+            } => {
+                let new_nominal_start_time = self.now_ms() - pos as i64;
+                match self.play_status {
+                    SpircPlayStatus::Playing {
+                        ref mut nominal_start_time,
+                        ..
+                    } if is_playing => {
+                        if (*nominal_start_time - new_nominal_start_time).abs() > 100 {
+                            *nominal_start_time = new_nominal_start_time;
+                            self.connect_state.update_position(pos, self.now_ms());
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    SpircPlayStatus::Paused { .. }
+                    | SpircPlayStatus::Playing { .. }
+                    | SpircPlayStatus::LoadingPlay { .. }
+                    | SpircPlayStatus::LoadingPause { .. } => {
+                        self.connect_state.update_position(pos, self.now_ms());
+                        self.play_status = if is_playing {
+                            SpircPlayStatus::Playing {
+                                nominal_start_time: new_nominal_start_time,
+                                preloading_of_next_track_triggered: false,
+                            }
+                        } else {
+                            SpircPlayStatus::Paused {
+                                position_ms: pos,
+                                preloading_of_next_track_triggered: false,
+                            }
+                        }
+                    }
+                    _ => return Ok(()),
+                }
             }
-            PlayerEvent::Loading { .. } => match self.play_status {
+            SpircPlayerEvent::UpdatePosition { position: None, .. } => match self.play_status {
                 SpircPlayStatus::LoadingPlay { position_ms } => {
                     self.connect_state
                         .update_position(position_ms, self.now_ms());
@@ -703,85 +711,25 @@ impl SpircTask {
                     trace!("==> Loading");
                 }
             },
-            PlayerEvent::Seeked { position_ms, .. } => {
-                trace!("==> Seeked");
-                self.connect_state
-                    .update_position(position_ms, self.now_ms())
+            SpircPlayerEvent::UpdatePlayStatus(status) => self.play_status = status,
+            SpircPlayerEvent::UpdateState => self.update_state = true,
+            SpircPlayerEvent::HandleNext => {
+                let next_track = self
+                    .connect_state
+                    .repeat_track()
+                    .then(|| self.connect_state.current_track(|t| t.uri.clone()));
+
+                self.handle_next(next_track)?
             }
-            PlayerEvent::Playing { position_ms, .. }
-            | PlayerEvent::PositionCorrection { position_ms, .. } => {
-                trace!("==> Playing");
-                let new_nominal_start_time = self.now_ms() - position_ms as i64;
-                match self.play_status {
-                    SpircPlayStatus::Playing {
-                        ref mut nominal_start_time,
-                        ..
-                    } => {
-                        if (*nominal_start_time - new_nominal_start_time).abs() > 100 {
-                            *nominal_start_time = new_nominal_start_time;
-                            self.connect_state
-                                .update_position(position_ms, self.now_ms());
-                        } else {
-                            return Ok(());
-                        }
-                    }
-                    SpircPlayStatus::LoadingPlay { .. } | SpircPlayStatus::LoadingPause { .. } => {
-                        self.connect_state
-                            .update_position(position_ms, self.now_ms());
-                        self.play_status = SpircPlayStatus::Playing {
-                            nominal_start_time: new_nominal_start_time,
-                            preloading_of_next_track_triggered: false,
-                        };
-                    }
-                    _ => return Ok(()),
-                }
-            }
-            PlayerEvent::Paused {
-                position_ms: new_position_ms,
-                ..
-            } => {
-                trace!("==> Paused");
-                match self.play_status {
-                    SpircPlayStatus::Paused { .. } | SpircPlayStatus::Playing { .. } => {
-                        self.connect_state
-                            .update_position(new_position_ms, self.now_ms());
-                        self.play_status = SpircPlayStatus::Paused {
-                            position_ms: new_position_ms,
-                            preloading_of_next_track_triggered: false,
-                        };
-                    }
-                    SpircPlayStatus::LoadingPlay { .. } | SpircPlayStatus::LoadingPause { .. } => {
-                        self.connect_state
-                            .update_position(new_position_ms, self.now_ms());
-                        self.play_status = SpircPlayStatus::Paused {
-                            position_ms: new_position_ms,
-                            preloading_of_next_track_triggered: false,
-                        };
-                    }
-                    _ => return Ok(()),
-                }
-            }
-            PlayerEvent::Stopped { .. } => {
-                trace!("==> Stopped");
-                match self.play_status {
-                    SpircPlayStatus::Stopped => return Ok(()),
-                    _ => self.play_status = SpircPlayStatus::Stopped,
-                }
-            }
-            PlayerEvent::TimeToPreloadNextTrack { .. } => {
-                self.handle_preload_next_track();
-                return Ok(());
-            }
-            PlayerEvent::Unavailable { track_id, .. } => {
-                self.handle_unavailable(track_id)?;
-                if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri()? {
+            SpircPlayerEvent::HandlePreloadNext => self.handle_preload_next_track(),
+            SpircPlayerEvent::HandleUnavailable { uri } => {
+                let uri = uri?;
+                if self.connect_state.current_track(|t| &t.uri) == &uri {
                     self.handle_next(None)?
                 }
+                self.handle_unavailable(uri)?;
             }
-            _ => return Ok(()),
         }
-
-        self.update_state = true;
         Ok(())
     }
 
@@ -1500,8 +1448,8 @@ impl SpircTask {
     }
 
     // Mark unavailable tracks so we can skip them later
-    fn handle_unavailable(&mut self, track_id: SpotifyId) -> Result<(), Error> {
-        self.connect_state.mark_unavailable(track_id)?;
+    fn handle_unavailable(&mut self, uri: String) -> Result<(), Error> {
+        self.connect_state.mark_unavailable(uri)?;
         self.handle_preload_next_track();
 
         Ok(())

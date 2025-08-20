@@ -34,10 +34,14 @@ use crate::{
     mixer::VolumeGetter,
 };
 
-#[cfg(feature = "passthrough-decoder")]
-use crate::decoder::PassthroughDecoder;
+pub use crate::player_event::*;
 
 use crate::SAMPLES_PER_SECOND;
+#[cfg(feature = "passthrough-decoder")]
+use crate::decoder::PassthroughDecoder;
+use crate::player::await_end_of_track::AwaitEndOfTrack;
+
+mod await_end_of_track;
 
 const PRELOAD_NEXT_TRACK_BEFORE_END_DURATION_MS: u32 = 30000;
 pub const DB_VOLTAGE_RATIO: f64 = 20.0;
@@ -75,7 +79,7 @@ struct PlayerInternal {
     sink_status: SinkStatus,
     sink_event_callback: Option<SinkEventCallback>,
     volume_getter: Box<dyn VolumeGetter + Send>,
-    event_senders: Vec<mpsc::UnboundedSender<PlayerEvent>>,
+    event_handler: Vec<Box<dyn PlayerEventListener>>,
     converter: Converter,
 
     normalisation_integrators: [f64; 2],
@@ -106,7 +110,7 @@ enum PlayerCommand {
     Stop,
     Seek(u32),
     SetSession(Session),
-    AddEventSender(mpsc::UnboundedSender<PlayerEvent>),
+    AddEventHandler(Box<dyn PlayerEventListener + Send>),
     SetSinkEventCallback(Option<SinkEventCallback>),
     EmitVolumeChangedEvent(u16),
     SetAutoNormaliseAsAlbum(bool),
@@ -132,154 +136,6 @@ enum PlayerCommand {
     },
     EmitAutoPlayChangedEvent(bool),
 }
-
-#[derive(Debug, Clone)]
-pub enum PlayerEvent {
-    // Play request id changed
-    PlayRequestIdChanged {
-        play_request_id: u64,
-    },
-    // Fired when the player is stopped (e.g. by issuing a "stop" command to the player).
-    Stopped {
-        play_request_id: u64,
-        track_id: SpotifyId,
-    },
-    // The player is delayed by loading a track.
-    Loading {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    // The player is preloading a track.
-    Preloading {
-        track_id: SpotifyId,
-    },
-    // The player is playing a track.
-    // This event is issued at the start of playback of whenever the position must be communicated
-    // because it is out of sync. This includes:
-    // start of a track
-    // un-pausing
-    // after a seek
-    // after a buffer-underrun
-    Playing {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    // The player entered a paused state.
-    Paused {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    // The player thinks it's a good idea to issue a preload command for the next track now.
-    // This event is intended for use within spirc.
-    TimeToPreloadNextTrack {
-        play_request_id: u64,
-        track_id: SpotifyId,
-    },
-    // The player reached the end of a track.
-    // This event is intended for use within spirc. Spirc will respond by issuing another command.
-    EndOfTrack {
-        play_request_id: u64,
-        track_id: SpotifyId,
-    },
-    // The player was unable to load the requested track.
-    Unavailable {
-        play_request_id: u64,
-        track_id: SpotifyId,
-    },
-    // The mixer volume was set to a new level.
-    VolumeChanged {
-        volume: u16,
-    },
-    PositionCorrection {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    /// Requires `PlayerConfig::position_update_interval` to be set to Some.
-    /// Once set this event will be sent periodically while playing the track to inform about the
-    /// current playback position
-    PositionChanged {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    Seeked {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    TrackChanged {
-        audio_item: Box<AudioItem>,
-    },
-    SessionConnected {
-        connection_id: String,
-        user_name: String,
-    },
-    SessionDisconnected {
-        connection_id: String,
-        user_name: String,
-    },
-    SessionClientChanged {
-        client_id: String,
-        client_name: String,
-        client_brand_name: String,
-        client_model_name: String,
-    },
-    ShuffleChanged {
-        shuffle: bool,
-    },
-    RepeatChanged {
-        context: bool,
-        track: bool,
-    },
-    AutoPlayChanged {
-        auto_play: bool,
-    },
-    FilterExplicitContentChanged {
-        filter: bool,
-    },
-}
-
-impl PlayerEvent {
-    pub fn get_play_request_id(&self) -> Option<u64> {
-        use PlayerEvent::*;
-        match self {
-            Loading {
-                play_request_id, ..
-            }
-            | Unavailable {
-                play_request_id, ..
-            }
-            | Playing {
-                play_request_id, ..
-            }
-            | TimeToPreloadNextTrack {
-                play_request_id, ..
-            }
-            | EndOfTrack {
-                play_request_id, ..
-            }
-            | Paused {
-                play_request_id, ..
-            }
-            | Stopped {
-                play_request_id, ..
-            }
-            | PositionCorrection {
-                play_request_id, ..
-            }
-            | Seeked {
-                play_request_id, ..
-            } => Some(*play_request_id),
-            _ => None,
-        }
-    }
-}
-
-pub type PlayerEventChannel = mpsc::UnboundedReceiver<PlayerEvent>;
 
 #[inline]
 pub fn db_to_ratio(db: f64) -> f64 {
@@ -482,7 +338,7 @@ impl Player {
                 sink_status: SinkStatus::Closed,
                 sink_event_callback: None,
                 volume_getter,
-                event_senders: vec![],
+                event_handler: vec![],
                 converter,
 
                 normalisation_peaks: [0.0; 2],
@@ -558,22 +414,14 @@ impl Player {
         self.command(PlayerCommand::SetSession(session));
     }
 
-    pub fn get_player_event_channel(&self) -> PlayerEventChannel {
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        self.command(PlayerCommand::AddEventSender(event_sender));
-        event_receiver
+    pub fn add_player_event_handler<F: PlayerEventListener + Send + 'static>(&self, handler: F) {
+        self.command(PlayerCommand::AddEventHandler(Box::new(handler)))
     }
 
     pub async fn await_end_of_track(&self) {
-        let mut channel = self.get_player_event_channel();
-        while let Some(event) = channel.recv().await {
-            if matches!(
-                event,
-                PlayerEvent::EndOfTrack { .. } | PlayerEvent::Stopped { .. }
-            ) {
-                return;
-            }
-        }
+        let (handler, receiver) = AwaitEndOfTrack::new();
+        self.add_player_event_handler(handler);
+        _ = receiver.await;
     }
 
     pub fn set_sink_event_callback(&self, callback: Option<SinkEventCallback>) {
@@ -1220,8 +1068,8 @@ impl Future for PlayerInternal {
                             error!(
                                 "Skipping to next track, unable to load track <{track_id:?}>: {e:?}"
                             );
-                            self.send_event(PlayerEvent::Unavailable {
-                                track_id,
+                            self.handle_event(PlayerEvent::Unavailable {
+                                track_id: &track_id,
                                 play_request_id,
                             })
                         }
@@ -1238,7 +1086,9 @@ impl Future for PlayerInternal {
             {
                 match loader.as_mut().poll(cx) {
                     Poll::Ready(Ok(loaded_track)) => {
-                        self.send_event(PlayerEvent::Preloading { track_id });
+                        self.handle_event(PlayerEvent::Preloading {
+                            track_id: &track_id,
+                        });
                         self.preload = PlayerPreload::Ready {
                             track_id,
                             loaded_track: Box::new(loaded_track),
@@ -1255,8 +1105,8 @@ impl Future for PlayerInternal {
                             play_request_id, ..
                         } = self.state
                         {
-                            self.send_event(PlayerEvent::Unavailable {
-                                track_id,
+                            self.handle_event(PlayerEvent::Unavailable {
+                                track_id: &track_id,
                                 play_request_id,
                             });
                         }
@@ -1336,11 +1186,13 @@ impl Future for PlayerInternal {
                                             if notify_about_position {
                                                 *reported_nominal_start_time =
                                                     now.checked_sub(new_stream_position);
-                                                self.send_event(PlayerEvent::PositionCorrection {
-                                                    play_request_id,
-                                                    track_id,
-                                                    position_ms: new_stream_position_ms,
-                                                });
+                                                self.handle_event(
+                                                    PlayerEvent::PositionCorrection {
+                                                        play_request_id,
+                                                        track_id: &track_id,
+                                                        position_ms: new_stream_position_ms,
+                                                    },
+                                                );
                                             }
 
                                             if let Some(interval) =
@@ -1351,11 +1203,13 @@ impl Future for PlayerInternal {
 
                                                 if last_progress_update_since_ms > interval {
                                                     self.last_progress_update = now;
-                                                    self.send_event(PlayerEvent::PositionChanged {
-                                                        play_request_id,
-                                                        track_id,
-                                                        position_ms: new_stream_position_ms,
-                                                    });
+                                                    self.handle_event(
+                                                        PlayerEvent::PositionChanged {
+                                                            play_request_id,
+                                                            track_id: &track_id,
+                                                            position_ms: new_stream_position_ms,
+                                                        },
+                                                    );
                                                 }
                                             }
                                         }
@@ -1363,8 +1217,8 @@ impl Future for PlayerInternal {
                                             error!(
                                                 "Skipping to next track, unable to decode samples for track <{track_id:?}>: {e:?}"
                                             );
-                                            self.send_event(PlayerEvent::EndOfTrack {
-                                                track_id,
+                                            self.handle_event(PlayerEvent::EndOfTrack {
+                                                track_id: &track_id,
                                                 play_request_id,
                                             })
                                         }
@@ -1378,8 +1232,8 @@ impl Future for PlayerInternal {
                             error!(
                                 "Skipping to next track, unable to get next packet for track <{track_id:?}>: {e:?}"
                             );
-                            self.send_event(PlayerEvent::EndOfTrack {
-                                track_id,
+                            self.handle_event(PlayerEvent::EndOfTrack {
+                                track_id: &track_id,
                                 play_request_id,
                             })
                         }
@@ -1415,8 +1269,8 @@ impl Future for PlayerInternal {
                     && stream_loader_controller.range_to_end_available()
                 {
                     *suggested_to_preload_next_track = true;
-                    self.send_event(PlayerEvent::TimeToPreloadNextTrack {
-                        track_id,
+                    self.handle_event(PlayerEvent::TimeToPreloadNextTrack {
+                        track_id: &track_id,
                         play_request_id,
                     });
                 }
@@ -1502,7 +1356,7 @@ impl PlayerInternal {
                 ..
             } => {
                 self.ensure_sink_stopped(false);
-                self.send_event(PlayerEvent::Stopped {
+                self.handle_event(PlayerEvent::Stopped {
                     track_id,
                     play_request_id,
                 });
@@ -1525,8 +1379,8 @@ impl PlayerInternal {
                 ..
             } => {
                 self.state.paused_to_playing();
-                self.send_event(PlayerEvent::Playing {
-                    track_id,
+                self.handle_event(PlayerEvent::Playing {
+                    track_id: &track_id,
                     play_request_id,
                     position_ms: stream_position_ms,
                 });
@@ -1554,8 +1408,8 @@ impl PlayerInternal {
                 self.state.playing_to_paused();
 
                 self.ensure_sink_stopped(false);
-                self.send_event(PlayerEvent::Paused {
-                    track_id,
+                self.handle_event(PlayerEvent::Paused {
+                    track_id: &track_id,
                     play_request_id,
                     position_ms: stream_position_ms,
                 });
@@ -1686,8 +1540,8 @@ impl PlayerInternal {
                     ..
                 } = self.state
                 {
-                    self.send_event(PlayerEvent::EndOfTrack {
-                        track_id,
+                    self.handle_event(PlayerEvent::EndOfTrack {
+                        track_id: &track_id,
                         play_request_id,
                     })
                 } else {
@@ -1705,9 +1559,9 @@ impl PlayerInternal {
         loaded_track: PlayerLoadedTrackData,
         start_playback: bool,
     ) {
-        let audio_item = Box::new(loaded_track.audio_item.clone());
-
-        self.send_event(PlayerEvent::TrackChanged { audio_item });
+        self.handle_event(PlayerEvent::TrackChanged {
+            audio_item: &loaded_track.audio_item,
+        });
 
         let position_ms = loaded_track.stream_position_ms;
 
@@ -1724,8 +1578,8 @@ impl PlayerInternal {
 
         if start_playback {
             self.ensure_sink_running();
-            self.send_event(PlayerEvent::Playing {
-                track_id,
+            self.handle_event(PlayerEvent::Playing {
+                track_id: &track_id,
                 play_request_id,
                 position_ms,
             });
@@ -1764,8 +1618,8 @@ impl PlayerInternal {
                 is_explicit: loaded_track.is_explicit,
             };
 
-            self.send_event(PlayerEvent::Paused {
-                track_id,
+            self.handle_event(PlayerEvent::Paused {
+                track_id: &track_id,
                 play_request_id,
                 position_ms,
             });
@@ -1782,7 +1636,7 @@ impl PlayerInternal {
         let play_request_id =
             play_request_id_option.unwrap_or(self.play_request_id_generator.get());
 
-        self.send_event(PlayerEvent::PlayRequestIdChanged { play_request_id });
+        self.handle_event(PlayerEvent::PlayRequestIdChanged { play_request_id });
 
         if !self.config.gapless {
             self.ensure_sink_stopped(play);
@@ -1939,7 +1793,7 @@ impl PlayerInternal {
             }
         }
 
-        self.send_event(PlayerEvent::Loading {
+        self.handle_event(PlayerEvent::Loading {
             track_id,
             play_request_id,
             position_ms,
@@ -2071,9 +1925,9 @@ impl PlayerInternal {
                     {
                         *stream_position_ms = new_position_ms;
 
-                        self.send_event(PlayerEvent::Seeked {
+                        self.handle_event(PlayerEvent::Seeked {
                             play_request_id,
-                            track_id,
+                            track_id: &track_id,
                             position_ms: new_position_ms,
                         });
                     }
@@ -2120,24 +1974,24 @@ impl PlayerInternal {
 
             PlayerCommand::SetSession(session) => self.session = session,
 
-            PlayerCommand::AddEventSender(sender) => self.event_senders.push(sender),
+            PlayerCommand::AddEventHandler(handler) => self.event_handler.push(handler),
 
             PlayerCommand::SetSinkEventCallback(callback) => self.sink_event_callback = callback,
 
             PlayerCommand::EmitVolumeChangedEvent(volume) => {
-                self.send_event(PlayerEvent::VolumeChanged { volume })
+                self.handle_event(PlayerEvent::VolumeChanged { volume })
             }
 
             PlayerCommand::EmitRepeatChangedEvent { context, track } => {
-                self.send_event(PlayerEvent::RepeatChanged { context, track })
+                self.handle_event(PlayerEvent::RepeatChanged { context, track })
             }
 
             PlayerCommand::EmitShuffleChangedEvent(shuffle) => {
-                self.send_event(PlayerEvent::ShuffleChanged { shuffle })
+                self.handle_event(PlayerEvent::ShuffleChanged { shuffle })
             }
 
             PlayerCommand::EmitAutoPlayChangedEvent(auto_play) => {
-                self.send_event(PlayerEvent::AutoPlayChanged { auto_play })
+                self.handle_event(PlayerEvent::AutoPlayChanged { auto_play })
             }
 
             PlayerCommand::EmitSessionClientChangedEvent {
@@ -2145,7 +1999,7 @@ impl PlayerInternal {
                 client_name,
                 client_brand_name,
                 client_model_name,
-            } => self.send_event(PlayerEvent::SessionClientChanged {
+            } => self.handle_event(PlayerEvent::SessionClientChanged {
                 client_id,
                 client_name,
                 client_brand_name,
@@ -2155,7 +2009,7 @@ impl PlayerInternal {
             PlayerCommand::EmitSessionConnectedEvent {
                 connection_id,
                 user_name,
-            } => self.send_event(PlayerEvent::SessionConnected {
+            } => self.handle_event(PlayerEvent::SessionConnected {
                 connection_id,
                 user_name,
             }),
@@ -2163,7 +2017,7 @@ impl PlayerInternal {
             PlayerCommand::EmitSessionDisconnectedEvent {
                 connection_id,
                 user_name,
-            } => self.send_event(PlayerEvent::SessionDisconnected {
+            } => self.handle_event(PlayerEvent::SessionDisconnected {
                 connection_id,
                 user_name,
             }),
@@ -2173,7 +2027,7 @@ impl PlayerInternal {
             }
 
             PlayerCommand::EmitFilterExplicitContentChangedEvent(filter) => {
-                self.send_event(PlayerEvent::FilterExplicitContentChanged { filter });
+                self.handle_event(PlayerEvent::FilterExplicitContentChanged { filter });
 
                 if filter {
                     if let PlayerState::Playing {
@@ -2193,8 +2047,8 @@ impl PlayerInternal {
                             warn!(
                                 "Currently loaded track is explicit, which client setting forbids -- skipping to next track."
                             );
-                            self.send_event(PlayerEvent::EndOfTrack {
-                                track_id,
+                            self.handle_event(PlayerEvent::EndOfTrack {
+                                track_id: &track_id,
                                 play_request_id,
                             })
                         }
@@ -2206,9 +2060,15 @@ impl PlayerInternal {
         Ok(())
     }
 
-    fn send_event(&mut self, event: PlayerEvent) {
-        self.event_senders
-            .retain(|sender| sender.send(event.clone()).is_ok());
+    fn handle_event(&mut self, event: PlayerEvent) {
+        self.event_handler.retain_mut(|handler| {
+            if handler.is_valid() {
+                handler.as_mut().on_event(&event);
+                handler.is_valid()
+            } else {
+                false
+            }
+        });
     }
 
     fn load_track(
@@ -2312,7 +2172,7 @@ impl fmt::Debug for PlayerCommand {
             PlayerCommand::Stop => f.debug_tuple("Stop").finish(),
             PlayerCommand::Seek(position) => f.debug_tuple("Seek").field(&position).finish(),
             PlayerCommand::SetSession(_) => f.debug_tuple("SetSession").finish(),
-            PlayerCommand::AddEventSender(_) => f.debug_tuple("AddEventSender").finish(),
+            PlayerCommand::AddEventHandler(_) => f.debug_tuple("AddEventHandler").finish(),
             PlayerCommand::SetSinkEventCallback(_) => {
                 f.debug_tuple("SetSinkEventCallback").finish()
             }
