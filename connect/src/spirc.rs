@@ -23,6 +23,7 @@ use crate::{
         social_connect_v2::SessionUpdate,
         transfer_state::TransferState,
         user_attributes::UserAttributesMutation,
+        {context_page::ContextPage, player::PlayerState},
     },
     state::{
         context::{ContextType, ResetContext},
@@ -31,7 +32,6 @@ use crate::{
     },
 };
 use futures_util::StreamExt;
-use librespot_protocol::context_page::ContextPage;
 use protobuf::MessageField;
 use std::{
     future::Future,
@@ -40,7 +40,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{broadcast, mpsc},
+    time::sleep,
+};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -106,6 +109,8 @@ struct SpircTask {
     /// when no other future resolves, otherwise resets the delay
     update_state: bool,
 
+    state_sender: broadcast::Sender<PlayerState>,
+
     spirc_id: usize,
 }
 
@@ -141,6 +146,7 @@ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 /// The spotify connect handle
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
+    state_sender: broadcast::Sender<PlayerState>,
 }
 
 impl Spirc {
@@ -217,6 +223,7 @@ impl Spirc {
         let _ = session.login5().auth_token().await?;
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (state_tx, _) = broadcast::channel(1);
 
         let player_events = player.get_player_event_channel();
 
@@ -250,10 +257,15 @@ impl Spirc {
             update_volume: false,
             update_state: false,
 
+            state_sender: state_tx.clone(),
+
             spirc_id,
         };
 
-        let spirc = Spirc { commands: cmd_tx };
+        let spirc = Spirc {
+            commands: cmd_tx,
+            state_sender: state_tx,
+        };
 
         let initial_volume = task.connect_state.device_info().volume;
         task.connect_state.set_volume(0);
@@ -396,6 +408,14 @@ impl Spirc {
     /// Does nothing if we are not the active device.
     pub fn activate(&self) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::Activate)?)
+    }
+
+    /// Get a channel which sends the [PlayerState] whenever it changes.
+    ///
+    /// Forwards the internal [PlayerState] when we are the active device. When we are only
+    /// a spectator, forwards any [PlayerState] update from the active player.
+    pub fn get_state_update_channel(&self) -> broadcast::Receiver<PlayerState> {
+        self.state_sender.subscribe()
     }
 }
 
@@ -886,6 +906,17 @@ impl SpircTask {
         }
     }
 
+    fn emit_state_update(&self, state: Option<PlayerState>) {
+        if self.state_sender.receiver_count() == 0 {
+            return;
+        }
+
+        let state = state.unwrap_or_else(|| self.connect_state.player().clone());
+        if let Err(why) = self.state_sender.send(state) {
+            warn!("couldn't emit state because: {why}")
+        }
+    }
+
     async fn handle_cluster_update(
         &mut self,
         mut cluster_update: ClusterUpdate,
@@ -898,7 +929,7 @@ impl SpircTask {
             cluster_update.cluster.active_device_id
         );
 
-        if let Some(cluster) = cluster_update.cluster.take() {
+        if let Some(mut cluster) = cluster_update.cluster.take() {
             let became_inactive = self.connect_state.is_active()
                 && cluster.active_device_id != self.session.device_id();
             if became_inactive {
@@ -910,6 +941,8 @@ impl SpircTask {
                 //  background: when another device sends a connect-state update, some player's position de-syncs
                 //  tried: providing session_id, playback_id, track-metadata "track_player"
                 self.update_state = true;
+            } else if let Some(state) = cluster.player_state.take() {
+                self.emit_state_update(Some(state))
             }
         } else if self.connect_state.is_active() {
             self.connect_state.became_inactive(&self.session).await?;
@@ -1728,6 +1761,8 @@ impl SpircTask {
         }
 
         self.connect_state.set_now(self.now_ms() as u64);
+
+        self.emit_state_update(None);
 
         self.connect_state
             .send_state(&self.session)
